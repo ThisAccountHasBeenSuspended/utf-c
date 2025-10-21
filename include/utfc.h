@@ -16,6 +16,17 @@
 #include <stdint.h>
 #include <stdbool.h>
 
+#define _UTFC_MAGIC_LEN 3
+#define _UTFC_MAJOR 0
+#define _UTFC_MINOR 0
+#define _UTFC_PATCH 0
+#define _UTFC_MIN_HEADER_LEN 7 // Magic(3) + Major(1) + Minor(1) + Flags(1) + Length(1)
+#define _UTFC_MAX_CHAR_LEN 4
+#define _UTFC_RESERVED_LEN 50
+#define _UTFC_MAX_DATA_LEN (UINT32_MAX - _UTFC_RESERVED_LEN)
+
+const char _UTFC_MAGIC_BYTES[_UTFC_MAGIC_LEN] = { 'U', '8', 'C' };
+
 typedef enum {
     /// No error.
     UTFC_ERROR_NONE,
@@ -23,6 +34,12 @@ typedef enum {
     UTFC_ERROR_UNKNOWN,
     /// A (re)allocation failed.
     UTFC_ERROR_OUT_OF_MEMORY,
+    /// The length of your data requires too many bytes.
+    /// Make sure the length of your data is less than:
+    // (UINT32_MAX - _UTFC_RESERVED_LEN) bytes.
+    UTFC_ERROR_TOO_MANY_BYTES,
+    /// Invalid header format.
+    UTFC_ERROR_INVALID_HEADER,
     /// A character contains an invalid byte.
     UTFC_ERROR_INVALID_BYTE,
 } UTFC_ERROR;
@@ -44,21 +61,20 @@ typedef enum {
 } _UTFC_HEADER_FLAGS;
 
 typedef struct {
+    uint32_t data_length;
     UTFC_ERROR status;
-    uint32_t length;
+    uint8_t major, minor, flags;
+    uint8_t length;
+    char magic[_UTFC_MAGIC_LEN];
+} _UTFC_HEADER;
+
+typedef struct {
     char *value;
+    uint32_t length;
+    UTFC_ERROR status;
 } UTFC_RESULT;
 
 /* ==================== #!PRIVATE!# ==================== */
-
-#define _UTFC_MAGIC_LEN 3
-#define _UTFC_MAJOR 0
-#define _UTFC_MINOR 0
-#define _UTFC_PATCH 0
-#define _UTFC_MIN_HEADER_LEN 6 // Magic(3) + Major(1) + Minor(1) + Flags(1)
-#define _UTFC_MAX_CHAR_LEN 4
-
-static const char _UTFC_MAGIC_BYTES[_UTFC_MAGIC_LEN] = { 'U', '8', 'C' };
 
 /**
  * Returns the byte length for the next char of a UTF-8 string.
@@ -68,8 +84,8 @@ static const char _UTFC_MAGIC_BYTES[_UTFC_MAGIC_LEN] = { 'U', '8', 'C' };
  * - `idx` + `return` is the index of the actual char.
  * - The `return` value 0 means that something went wrong.
  */
-static uint32_t _utfc_char_len(const char *value, uint32_t length, uint32_t idx) {
-    const int8_t byte = (int8_t)value[idx];
+static uint8_t _utfc_char_len(const char *value, uint32_t length, uint32_t idx) {
+    const char byte = value[idx];
     uint8_t char_len = 1;
 
     // Single-byte character
@@ -85,7 +101,7 @@ static uint32_t _utfc_char_len(const char *value, uint32_t length, uint32_t idx)
 
     if ((length - idx) < char_len) return 0;
 
-    for (uint32_t i = 1; i < char_len; ++i) {
+    for (uint8_t i = 1; i < char_len; ++i) {
         if ((value[idx + i] & 0xC0) != 0x80) {
             // No valid continuation byte
             return 0;
@@ -138,19 +154,60 @@ static bool _utfc_write_header(UTFC_RESULT *result, uint32_t length) {
     result->value[result->length++] = flags;
 
     // Write length of decompressed data
-    result->value[result->length++] = (length & 0xFF);
+    result->value[result->length++] = (char)length;
     if (extra_length_bytes == _UTFC_HEADER_FLAG_16_BIT_LENGTH) {
-        result->value[result->length++] = ((length >> 8) & 0xFF);
+        result->value[result->length++] = (char)(length >> 8);
     } else if (extra_length_bytes == _UTFC_HEADER_FLAG_24_BIT_LENGTH) {
-        result->value[result->length++] = ((length >> 8) & 0xFF);
-        result->value[result->length++] = ((length >> 16) & 0xFF);
+        result->value[result->length++] = (char)(length >> 8);
+        result->value[result->length++] = (char)(length >> 16);
     } else if (extra_length_bytes == _UTFC_HEADER_FLAG_32_BIT_LENGTH) {
-        result->value[result->length++] = ((length >> 8) & 0xFF);
-        result->value[result->length++] = ((length >> 16) & 0xFF);
-        result->value[result->length++] = ((length >> 24) & 0xFF);
+        result->value[result->length++] = (char)(length >> 8);
+        result->value[result->length++] = (char)(length >> 16);
+        result->value[result->length++] = (char)(length >> 24);
     }
     
     return true;
+}
+
+static _UTFC_HEADER _utfc_read_header(const char *data) {
+    _UTFC_HEADER header = { 0 };
+
+    for (uint8_t i = 0; i < _UTFC_MAGIC_LEN; i++) {
+        if (data[i] == '\0' || data[i] != _UTFC_MAGIC_BYTES[i]) {
+            header.status = UTFC_ERROR_INVALID_HEADER;
+            return header;
+        }
+        header.magic[i] = data[i];
+    }
+
+    header.major = data[3];
+    header.minor = data[4];
+
+    // TODO
+    if (header.major > _UTFC_MAJOR || header.minor > _UTFC_MINOR) {
+        header.status = UTFC_ERROR_INVALID_HEADER;
+        return header;
+    }
+
+    header.flags = data[5];
+    header.data_length = (uint32_t)data[6] & 0xFF;
+
+    uint8_t extra_length_bytes = header.flags & 0b11;
+    if (extra_length_bytes == _UTFC_HEADER_FLAG_16_BIT_LENGTH) {
+        header.data_length |= ((uint32_t)data[7] & 0xFF) << 8;
+    } else if (extra_length_bytes == _UTFC_HEADER_FLAG_24_BIT_LENGTH) {
+        header.data_length |= ((uint32_t)data[7] & 0xFF) << 8;
+        header.data_length |= ((uint32_t)data[8] & 0xFF) << 16;
+    } else if (extra_length_bytes == _UTFC_HEADER_FLAG_32_BIT_LENGTH) {
+        header.data_length |= ((uint32_t)data[7] & 0xFF) << 8;
+        header.data_length |= ((uint32_t)data[8] & 0xFF) << 16;
+        header.data_length |= ((uint32_t)data[9] & 0xFF) << 24;
+    }
+
+    uint8_t total_header_length = _UTFC_MIN_HEADER_LEN + extra_length_bytes;
+    header.length = total_header_length;
+
+    return header;
 }
 
 /* ==================== #!PUBLIC!# ==================== */
@@ -164,6 +221,12 @@ void utfc_result_deinit(UTFC_RESULT *result) {
 
 UTFC_RESULT utfc_compress(const char *data, uint32_t length) {
     UTFC_RESULT result = _utfc_result_init();
+    
+    if (length > _UTFC_MAX_DATA_LEN) {
+        result.status = UTFC_ERROR_TOO_MANY_BYTES;
+        return result;
+    }
+
     if (_utfc_write_header(&result, length) == false) {
         return result;
     }
@@ -219,12 +282,7 @@ UTFC_RESULT utfc_compress(const char *data, uint32_t length) {
             read_pos += prefix_len;
         }
 
-        const char byte = data[read_pos];
-        result.value[result.length++] = byte;
-        if (byte == '\0') {
-            // End of string reached
-            break;
-        }
+        result.value[result.length++] = data[read_pos];
     }
 
     char *resized_value = (char *)realloc(result.value, result.length);
@@ -235,10 +293,51 @@ UTFC_RESULT utfc_compress(const char *data, uint32_t length) {
     return result;
 }
 
-UTFC_RESULT utfc_decompress(const char *data, uint32_t length) {
+/**
+ * Notes:
+ * - return.length contains only the written bytes, not the possible '\0' at the end.
+ */
+UTFC_RESULT utfc_decompress(const char *data, uint32_t length, bool terminate) {
     UTFC_RESULT result = _utfc_result_init();
+    _UTFC_HEADER header = _utfc_read_header(data);
+    if (header.status != UTFC_ERROR_NONE) {
+        return result;
+    }
 
-    // TODO
+    // If terminate = 1 we allocate one more to terminate it with a '\0'.
+    result.value = (char *)malloc(header.data_length + (terminate != 0 ? 1 : 0));
+    if (result.value == NULL) {
+        result.status = UTFC_ERROR_OUT_OF_MEMORY;
+        return result;
+    }
+
+    char *cached_prefix = NULL;
+    uint8_t cached_prefix_len = 0;
+
+    for (
+            uint32_t read_pos = header.length;
+            (read_pos < length) && (result.length < header.data_length);
+            read_pos++
+    ) {
+        // 0:   cached_prefix + value
+        // 1:   ASCII (no prefix)
+        // 2-4: new prefix + value
+        const uint8_t char_len = _utfc_char_len(data, length, read_pos);
+        if (char_len > 1) {
+            cached_prefix = (char *)&data[read_pos];
+            cached_prefix_len = char_len - 1;
+
+            read_pos += cached_prefix_len;
+        }
+
+        if (char_len != 1) {
+            for (uint8_t i = 0; i < cached_prefix_len; i++) {
+                result.value[result.length++] = cached_prefix[i];
+            }
+        }
+
+        result.value[result.length++] = data[read_pos];
+    }
 
     return result;
 }
