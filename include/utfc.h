@@ -24,6 +24,7 @@
 #define _UTFC_MAX_CHAR_LEN 4
 #define _UTFC_RESERVED_LEN 50
 #define _UTFC_MAX_DATA_LEN (UINT32_MAX - _UTFC_RESERVED_LEN)
+#define _UTFC_UNUSED_FLAG_BITS 0b11111100 // _UTFC_HEADER_FLAGS
 
 const char _UTFC_MAGIC_BYTES[_UTFC_MAGIC_LEN] = { 'U', '8', 'C' };
 
@@ -51,13 +52,6 @@ typedef enum {
     _UTFC_HEADER_FLAG_24_BIT_LENGTH = 0b00000010,
     /// Extended length up to 4.294.967.295 bytes.
     _UTFC_HEADER_FLAG_32_BIT_LENGTH = 0b00000011,
-
-    _UTFC_HEADER_FLAG_RESERVED1     = 0b00000100,
-    _UTFC_HEADER_FLAG_RESERVED2     = 0b00001000,
-    _UTFC_HEADER_FLAG_RESERVED3     = 0b00010000,
-    _UTFC_HEADER_FLAG_RESERVED4     = 0b00100000,
-    _UTFC_HEADER_FLAG_RESERVED5     = 0b01000000,
-    _UTFC_HEADER_FLAG_RESERVED6     = 0b10000000,
 } _UTFC_HEADER_FLAGS;
 
 typedef struct {
@@ -111,15 +105,6 @@ static uint8_t _utfc_char_len(const char *value, uint32_t length, uint32_t idx) 
     return char_len;
 }
 
-static inline UTFC_RESULT _utfc_result_init() {
-    UTFC_RESULT result = (UTFC_RESULT){
-        .status = UTFC_ERROR_NONE,
-        .length = 0,
-        .value = NULL
-    };
-    return result;
-}
-
 static bool _utfc_write_header(UTFC_RESULT *result, uint32_t length) {
     uint8_t extra_length_bytes = 0;
     if (length > (((uint32_t)UINT8_MAX << 16) | UINT16_MAX)) {
@@ -130,7 +115,7 @@ static bool _utfc_write_header(UTFC_RESULT *result, uint32_t length) {
         extra_length_bytes = _UTFC_HEADER_FLAG_16_BIT_LENGTH;
     }
 
-    const uint32_t estimated_size = _UTFC_MIN_HEADER_LEN + 1 + extra_length_bytes + length;
+    const uint32_t estimated_size = _UTFC_MIN_HEADER_LEN + extra_length_bytes + length;
     result->value = (char *)malloc(estimated_size);
     if (result->value == NULL) {
         result->status = UTFC_ERROR_OUT_OF_MEMORY;
@@ -169,11 +154,15 @@ static bool _utfc_write_header(UTFC_RESULT *result, uint32_t length) {
     return true;
 }
 
-static _UTFC_HEADER _utfc_read_header(const char *data) {
+static _UTFC_HEADER _utfc_read_header(const char *data, uint32_t length) {
     _UTFC_HEADER header = { 0 };
+    if (length < _UTFC_MIN_HEADER_LEN) {
+        header.status = UTFC_ERROR_INVALID_HEADER;
+        return header;
+    }
 
     for (uint8_t i = 0; i < _UTFC_MAGIC_LEN; i++) {
-        if (data[i] == '\0' || data[i] != _UTFC_MAGIC_BYTES[i]) {
+        if (data[i] != _UTFC_MAGIC_BYTES[i]) {
             header.status = UTFC_ERROR_INVALID_HEADER;
             return header;
         }
@@ -183,13 +172,20 @@ static _UTFC_HEADER _utfc_read_header(const char *data) {
     header.major = data[3];
     header.minor = data[4];
 
-    // TODO
+    // Should we allow higher versions?
     if (header.major > _UTFC_MAJOR || header.minor > _UTFC_MINOR) {
         header.status = UTFC_ERROR_INVALID_HEADER;
         return header;
     }
 
     header.flags = data[5];
+    // Something important may be missing.
+    // We should only allow older versions with the same possible flags.
+    if ((header.flags & _UTFC_UNUSED_FLAG_BITS) != 0) {
+        header.status = UTFC_ERROR_INVALID_HEADER;
+        return header;
+    }
+
     header.data_length = (uint32_t)data[6] & 0xFF;
 
     uint8_t extra_length_bytes = header.flags & 0b11;
@@ -220,7 +216,7 @@ void utfc_result_deinit(UTFC_RESULT *result) {
 }
 
 UTFC_RESULT utfc_compress(const char *data, uint32_t length) {
-    UTFC_RESULT result = _utfc_result_init();
+    UTFC_RESULT result = { 0 };
     
     if (length > _UTFC_MAX_DATA_LEN) {
         result.status = UTFC_ERROR_TOO_MANY_BYTES;
@@ -298,8 +294,8 @@ UTFC_RESULT utfc_compress(const char *data, uint32_t length) {
  * - return.length contains only the written bytes, not the possible '\0' at the end.
  */
 UTFC_RESULT utfc_decompress(const char *data, uint32_t length, bool terminate) {
-    UTFC_RESULT result = _utfc_result_init();
-    _UTFC_HEADER header = _utfc_read_header(data);
+    UTFC_RESULT result = { 0 };
+    _UTFC_HEADER header = _utfc_read_header(data, length);
     if (header.status != UTFC_ERROR_NONE) {
         return result;
     }
