@@ -10,11 +10,25 @@
  */
 
 #if !defined(UTFC_H)
-#define UTFC_H
+#define UTFC_H 1
+
+#if defined(__x86_64__) || defined(__amd64__) || defined(_M_X64) || defined(_M_AMD64) || defined(__i386__) || defined(_M_IX86)
+    #define _UTFC_X86 1
+#endif // defined(__x86_64__) || defined(__amd64__) || defined(_M_X64) || defined(_M_AMD64) || defined(__i386__) || defined(_M_IX86)
 
 #include <stdlib.h>
 #include <stdint.h>
 #include <stdbool.h>
+#include <string.h>
+
+#if defined(_UTFC_X86)
+    // Instructions for SSE|AVX.
+    #include <immintrin.h>
+    #if defined(_MSC_VER)
+        // MS-specific instrinsics.
+        #include <intrin.h>
+    #endif // defined(_MSC_VER)
+#endif // defined(_UTFC_X86)
 
 #define _UTFC_MAGIC_LEN 3
 #define _UTFC_MAJOR 0
@@ -69,6 +83,65 @@ typedef struct {
 } UTFC_RESULT;
 
 /* ==================== #!PRIVATE!# ==================== */
+
+static bool _utfc_next_non_ascii(const char *value, uint32_t length, uint32_t idx, int *out) {
+    if (idx >= length) {
+        return false;
+    }
+
+    uint32_t pos = idx;
+
+#if defined(_UTFC_X86) && defined(__AVX2__)
+    while ((pos + 32) <= length) {
+        const __m256i vec = _mm256_loadu_si256((const __m256i *)&value[pos]);
+        const int mask = _mm256_movemask_epi8(vec);
+        if (mask != 0) {
+#if defined(_MSC_VER)
+            if (_BitScanForward(out, mask) != 0) {
+                return false;
+            }
+#else // defined(_MSC_VER)
+            *out = __builtin_ctz(mask);
+#endif // defined(_MSC_VER)
+            *out += pos;
+            return true;
+        }
+
+        pos += 32;
+    }
+#endif // defined(_UTFC_X86) && defined(__AVX2__)
+
+#if defined(_UTFC_X86) && defined(__SSE2__)
+    while ((pos + 16) <= length) {
+        const __m128i vec = _mm_loadu_si128((const __m128i *)&value[pos]);
+        const int mask = _mm_movemask_epi8(vec);
+        if (mask != 0) {
+#if defined(_MSC_VER)
+            if (_BitScanForward(out, mask) != 0) {
+                return false;
+            }
+#else // defined(_MSC_VER)
+            *out  = __builtin_ctz(mask);
+#endif // defined(_MSC_VER)
+            *out += pos;
+            printf("SSE2 FOUND!\n");
+            return true;
+        }
+
+        pos += 16;
+    }
+#endif // defined(_UTFC_X86) && defined(__SSE2__)
+
+    while ((pos + 1) <= length) {
+        if ((value[pos] & 0x80) != 0) {
+            *out = pos;
+            return true;
+        }
+        pos += 1;
+    }
+
+    return false;
+}
 
 /**
  * Returns the byte length for the next char of a UTF-8 string.
@@ -230,7 +303,8 @@ UTFC_RESULT utfc_compress(const char *data, uint32_t length) {
     char *cached_prefix = NULL;
     uint8_t cached_prefix_len = 0;
 
-    for (uint32_t read_pos = 0; read_pos < length; read_pos++) {
+    uint32_t read_pos = 0;
+    while (read_pos < length) {
         const uint8_t char_len = _utfc_char_len(data, length, read_pos);
         if (char_len == 0) {
             // Something is wrong with the next character, so we return
@@ -276,9 +350,26 @@ UTFC_RESULT utfc_compress(const char *data, uint32_t length) {
             }
 
             read_pos += prefix_len;
+        } else if ((read_pos + 1) < length && (data[read_pos + 1] & 0x80) == 0) {
+            // Our current and next chars are ASCII.
+            // Let's find the next non-ASCII char and efficiently copy them all up to that index.
+            int next_idx = 0;
+            bool found = _utfc_next_non_ascii(data, length, read_pos, &next_idx);
+            if (found == true) {
+                while (read_pos < next_idx) {
+                    result.value[result.length++] = data[read_pos++];
+                }
+                continue;
+            }
+
+            // Only ASCII chars left.
+            uint32_t left = (length - read_pos);
+            memcpy(&result.value[result.length], &data[read_pos], left);
+            result.length += left;
+            break;
         }
 
-        result.value[result.length++] = data[read_pos];
+        result.value[result.length++] = data[read_pos++];
     }
 
     char *resized_value = (char *)realloc(result.value, result.length);
