@@ -84,7 +84,7 @@ typedef struct {
 
 /* ==================== #!PRIVATE!# ==================== */
 
-static bool _utfc_next_non_ascii(const char *value, uint32_t length, uint32_t idx, int *out) {
+static bool _utfc_next_non_ascii(const char *value, uint32_t length, uint32_t idx, uint32_t *out) {
     if (idx >= length) {
         return false;
     }
@@ -93,15 +93,15 @@ static bool _utfc_next_non_ascii(const char *value, uint32_t length, uint32_t id
 
 #if defined(_UTFC_X86) && defined(__AVX2__)
     while ((pos + 32) <= length) {
-        const __m256i vec = _mm256_loadu_si256((const __m256i *)&value[pos]);
-        const int mask = _mm256_movemask_epi8(vec);
-        if (mask != 0) {
+        const __m256i v = _mm256_loadu_si256((const __m256i *)&value[pos]);
+        const int m = _mm256_movemask_epi8(v);
+        if (m != 0) {
 #if defined(_MSC_VER)
-            if (_BitScanForward(out, mask) != 0) {
+            if (_BitScanForward(out, m) != 0) {
                 return false;
             }
 #else // defined(_MSC_VER)
-            *out = __builtin_ctz(mask);
+            *out = __builtin_ctz(m);
 #endif // defined(_MSC_VER)
             *out += pos;
             return true;
@@ -113,18 +113,17 @@ static bool _utfc_next_non_ascii(const char *value, uint32_t length, uint32_t id
 
 #if defined(_UTFC_X86) && defined(__SSE2__)
     while ((pos + 16) <= length) {
-        const __m128i vec = _mm_loadu_si128((const __m128i *)&value[pos]);
-        const int mask = _mm_movemask_epi8(vec);
-        if (mask != 0) {
+        const __m128i v = _mm_loadu_si128((const __m128i *)&value[pos]);
+        const int m = _mm_movemask_epi8(v);
+        if (m != 0) {
 #if defined(_MSC_VER)
-            if (_BitScanForward(out, mask) != 0) {
+            if (_BitScanForward(out, m) != 0) {
                 return false;
             }
 #else // defined(_MSC_VER)
-            *out  = __builtin_ctz(mask);
+            *out  = __builtin_ctz(m);
 #endif // defined(_MSC_VER)
             *out += pos;
-            printf("SSE2 FOUND!\n");
             return true;
         }
 
@@ -234,13 +233,11 @@ static _UTFC_HEADER _utfc_read_header(const char *data, uint32_t length) {
         return header;
     }
 
-    for (uint8_t i = 0; i < _UTFC_MAGIC_LEN; i++) {
-        if (data[i] != _UTFC_MAGIC_BYTES[i]) {
-            header.status = UTFC_ERROR_INVALID_HEADER;
-            return header;
-        }
-        header.magic[i] = data[i];
+    if (memcmp(data, _UTFC_MAGIC_BYTES, 3) != 0) {
+        header.status = UTFC_ERROR_INVALID_HEADER;
+        return header;
     }
+    memcpy(header.magic, data, 3);
 
     header.major = data[3];
     header.minor = data[4];
@@ -331,11 +328,8 @@ UTFC_RESULT utfc_compress(const char *data, uint32_t length) {
 
             // If the length is not different, we check if the bytes are identical.
             if (prefix_changed == false) {
-                for (int8_t i = 0; i < prefix_len; i++) {
-                    if (cached_prefix[i] != data[read_pos + i]) {
-                        prefix_changed = true;
-                        break;
-                    }
+                if (memcmp(cached_prefix, &data[read_pos], prefix_len) != 0) {
+                    prefix_changed = true;
                 }
             }
 
@@ -344,16 +338,15 @@ UTFC_RESULT utfc_compress(const char *data, uint32_t length) {
                 cached_prefix = (char *)&data[read_pos];
                 cached_prefix_len = prefix_len;
 
-                for (int8_t i = 0; i < prefix_len; i++) {
-                    result.value[result.length++] = data[read_pos + i];
-                }
+                memcpy(&result.value[result.length], &data[read_pos], prefix_len);
+                result.length += prefix_len;
             }
 
             read_pos += prefix_len;
         } else if ((read_pos + 1) < length && (data[read_pos + 1] & 0x80) == 0) {
             // Our current and next chars are ASCII.
             // Let's find the next non-ASCII char and efficiently copy them all up to that index.
-            int next_idx = 0;
+            uint32_t next_idx = 0;
             bool found = _utfc_next_non_ascii(data, length, read_pos, &next_idx);
             if (found == true) {
                 while (read_pos < next_idx) {
@@ -401,11 +394,8 @@ UTFC_RESULT utfc_decompress(const char *data, uint32_t length, bool terminate) {
     char *cached_prefix = NULL;
     uint8_t cached_prefix_len = 0;
 
-    for (
-            uint32_t read_pos = header.length;
-            (read_pos < length) && (result.length < header.data_length);
-            read_pos++
-    ) {
+    uint32_t read_pos = header.length;
+    while ((read_pos < length) && (result.length < header.data_length)) {
         // 0:   cached_prefix + value
         // 1:   ASCII (no prefix)
         // 2-4: new prefix + value
@@ -418,12 +408,11 @@ UTFC_RESULT utfc_decompress(const char *data, uint32_t length, bool terminate) {
         }
 
         if (char_len != 1) {
-            for (uint8_t i = 0; i < cached_prefix_len; i++) {
-                result.value[result.length++] = cached_prefix[i];
-            }
+            memcpy(&result.value[result.length], cached_prefix, cached_prefix_len);
+            result.length += cached_prefix_len;
         }
 
-        result.value[result.length++] = data[read_pos];
+        result.value[result.length++] = data[read_pos++];
     }
 
     return result;
