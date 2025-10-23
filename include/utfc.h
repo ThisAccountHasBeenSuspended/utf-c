@@ -16,8 +16,10 @@
     #define _UTFC_X86 1
     #if defined(__x86_64__) || defined(__amd64__) || defined(_M_X64) || defined(_M_AMD64)
         #define _UTFC_64BIT 1
-    #endif // defined(__x86_64__) || defined(__amd64__) || defined(_M_X64) || defined(_M_AMD64)
-#endif // defined(__x86_64__) || defined(__amd64__) || defined(_M_X64) || defined(_M_AMD64) || defined(__i386__) || defined(_M_IX86)
+    #endif
+#elif defined(__ARM_NEON) || defined(__ARM_NEON__) || defined(__aarch64__) || defined(__arm64__) || defined(_M_ARM64) || (defined(_M_ARM) && defined(_M_ARM_NEON))
+    #define _UTFC_ARM 1
+#endif
 
 #include <stddef.h>
 #include <stdlib.h>
@@ -31,8 +33,10 @@
     #if defined(_MSC_VER)
         // MS-specific instrinsics.
         #include <intrin.h>
-    #endif // defined(_MSC_VER)
-#endif // defined(_UTFC_X86)
+    #endif
+#elif defined(_UTFC_ARM)
+    #include <arm_neon.h>
+#endif
 
 #define _UTFC_MAGIC_LEN 3
 #define _UTFC_MAJOR 0
@@ -97,65 +101,82 @@ static bool _utfc_next_non_ascii(const char *value, size_t length, size_t idx, s
 
 #if defined(_UTFC_X86) && defined(_UTFC_64BIT) && defined(__AVX512BW__)
     while ((pos + 64) <= length) {
-        const __m512i v = _mm512_loadu_si512((const __m512i *)&value[pos]);
-        const uint64_t m = _mm512_movepi8_mask(v);
-        if (m != 0) {
-#if defined(_MSC_VER)
-            if (_BitScanForward64(out, m) != 0) {
+        const __m512i vec = _mm512_loadu_si512((const __m512i *)&value[pos]);
+        const uint64_t mask = _mm512_movepi8_mask(vec);
+        if (mask != 0) {
+        #if defined(_MSC_VER)
+            if (_BitScanForward64(out, mask) != 0) {
                 return false;
             }
-#else // defined(_MSC_VER)
-            *out = __builtin_ctzll(m);
-#endif // defined(_MSC_VER)
+        #else
+            *out = __builtin_ctzll(mask);
+        #endif
             *out += pos;
             return true;
         }
 
         pos += 64;
     }
-#endif // defined(_UTFC_X86) && defined(_UTFC_64BIT) && defined(__AVX512F__)
+#endif
 
 #if defined(_UTFC_X86) && defined(__AVX2__)
     while ((pos + 32) <= length) {
-        const __m256i v = _mm256_loadu_si256((const __m256i *)&value[pos]);
-        const uint32_t m = _mm256_movemask_epi8(v);
-        if (m != 0) {
-#if defined(_MSC_VER)
-            if (_BitScanForward(out, m) != 0) {
+        const __m256i vec = _mm256_loadu_si256((const __m256i *)&value[pos]);
+        const uint32_t mask = _mm256_movemask_epi8(vec);
+        if (mask != 0) {
+        #if defined(_MSC_VER)
+            if (_BitScanForward(out, mask) != 0) {
                 return false;
             }
-#else // defined(_MSC_VER)
-            *out = __builtin_ctz(m);
-#endif // defined(_MSC_VER)
+        #else
+            *out = __builtin_ctz(mask);
+        #endif
             *out += pos;
             return true;
         }
 
         pos += 32;
     }
-#endif // defined(_UTFC_X86) && defined(__AVX2__)
+#endif
 
-#if defined(_UTFC_X86) && defined(__SSE2__)
+#if (defined(_UTFC_X86) && defined(__SSE2__)) || defined(_UTFC_ARM)
     while ((pos + 16) <= length) {
-        const __m128i v = _mm_loadu_si128((const __m128i *)&value[pos]);
-        const uint16_t m = _mm_movemask_epi8(v);
-        if (m != 0) {
-#if defined(_MSC_VER)
-            if (_BitScanForward(out, m) != 0) {
+    #if defined(_UTFC_X86)
+        const __m128i vec = _mm_loadu_si128((const __m128i *)&value[pos]);
+        const uint16_t mask = _mm_movemask_epi8(vec);
+    #else
+        const uint8x16_t vec = vld1q_u8((const uint8_t *)&value[pos]);
+        // Right-shift each 8-bit element by 7,
+        // effectively extracting the MSB into the LSB.
+        const uint8x16_t msbs = vshrq_n_u8(vec, 7);
+        // Reinterpret 16x8-bit elements as 2x64-bit elements.
+        uint64x2_t bits = vreinterpretq_u64_u8(msbs);
+        // The bits B are shifted to the right by C and accumulated with A.
+        bits = vsraq_n_u64(bits, bits, 7);
+        bits = vsraq_n_u64(bits, bits, 14);
+        bits = vsraq_n_u64(bits, bits, 28);
+        // Reinterpret 2x64-bit elements as 16x8-bit elements.
+        const uint8x16_t output = vreinterpretq_u8_u64(bits);
+        // Get all MSB of the 16 bytes from index 0(low) and 8(high).
+        const uint16_t mask = ((uint16_t)vgetq_lane_u8(output, 8) << 8) | (uint16_t)vgetq_lane_u8(output, 0);
+    #endif
+        if (mask != 0) {
+        #if defined(_MSC_VER)
+            if (_BitScanForward(out, mask) != 0) {
                 return false;
             }
-#else // defined(_MSC_VER)
-            *out  = __builtin_ctz(m);
-#endif // defined(_MSC_VER)
+        #else
+            *out  = __builtin_ctz(mask);
+        #endif
             *out += pos;
             return true;
         }
 
         pos += 16;
     }
-#endif // defined(_UTFC_X86) && defined(__SSE2__)
+#endif
 
-    while ((pos + 1) <= length) {
+    while (pos < length) {
         if ((value[pos] & 0x80) != 0) {
             *out = pos;
             return true;
@@ -219,9 +240,8 @@ static bool _utfc_write_header(UTFC_RESULT *result, size_t length) {
     }
 
     // Write magic
-    for (uint8_t i = 0; i < _UTFC_MAGIC_LEN; i++) {
-        result->value[result->length++] = _UTFC_MAGIC_BYTES[i];
-    }
+    memcpy(&result->value[result->length], _UTFC_MAGIC_BYTES, _UTFC_MAGIC_LEN);
+    result->length += _UTFC_MAGIC_LEN;
 
     // Write major
     result->value[result->length++] = _UTFC_MAJOR;
@@ -317,7 +337,7 @@ UTFC_RESULT utfc_compress(const char *data, size_t length) {
         return result;
     }
 
-    if (_utfc_write_header(&result, length) == false) {
+    if (!_utfc_write_header(&result, length)) {
         return result;
     }
 
@@ -351,14 +371,14 @@ UTFC_RESULT utfc_compress(const char *data, size_t length) {
             bool prefix_changed = (prefix_len != cached_prefix_len);
 
             // If the length is not different, we check if the bytes are identical.
-            if (prefix_changed == false) {
+            if (!prefix_changed) {
                 if (memcmp(cached_prefix, &data[read_pos], prefix_len) != 0) {
                     prefix_changed = true;
                 }
             }
 
             // When we have a new prefix, it is cached and written.
-            if (prefix_changed == true) {
+            if (prefix_changed) {
                 cached_prefix = (char *)&data[read_pos];
                 cached_prefix_len = prefix_len;
 
@@ -370,10 +390,10 @@ UTFC_RESULT utfc_compress(const char *data, size_t length) {
         } else if ((read_pos + 1) < length && (data[read_pos + 1] & 0x80) == 0) {
             // Our current and next chars are ASCII.
             // Let's find the next non-ASCII char and efficiently copy them all up to that index.
-            size_t next_idx = 0;
-            bool found = _utfc_next_non_ascii(data, length, read_pos, &next_idx);
-            if (found == true) {
-                while (read_pos < next_idx) {
+            size_t nna_out = 0;
+            bool nna_result = _utfc_next_non_ascii(data, length, read_pos, &nna_out);
+            if (nna_result) {
+                while (read_pos < nna_out) {
                     result.value[result.length++] = data[read_pos++];
                 }
                 continue;
@@ -424,6 +444,29 @@ UTFC_RESULT utfc_decompress(const char *data, size_t length, bool terminate) {
         // 1:   ASCII (no prefix)
         // 2-4: new prefix + value
         const uint8_t char_len = _utfc_char_len(data, length, read_pos);
+        if (char_len == 1) {
+            // If the next byte is also ASCII, we use SIMD to find the next
+            // non-ASCII byte and efficiently copy everything up to that index.
+            if ((read_pos + 1) < length && (data[read_pos + 1] & 0x80) == 0) {
+                size_t nna_out = 0;
+                const bool nna_result = _utfc_next_non_ascii(data, length, read_pos, &nna_out);
+                if (nna_result) {
+                    // We found another non-ASCII char.
+                    const size_t estimated_size = nna_out - read_pos;
+
+                    memcpy(&result.value[result.length], &data[read_pos], estimated_size);
+                    result.length += estimated_size;
+                    read_pos += estimated_size;
+                    continue;
+                }
+
+                // No non-ASCII left.
+                memcpy(&result.value[result.length], &data[read_pos], length);
+                result.length += length - read_pos;
+                return result;
+            }
+        }
+        
         if (char_len > 1) {
             cached_prefix = (char *)&data[read_pos];
             cached_prefix_len = char_len - 1;

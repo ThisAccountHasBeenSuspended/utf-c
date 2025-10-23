@@ -1,6 +1,16 @@
-CC ?= gcc
-CFLAGS ?= -std=c99 -O2 -Wall -Wextra -I include
+# Default flags
+CFLAGS = -std=c99 -O2 -Wall -Wextra -I include
 
+ifeq ($(arm),1)
+	CC = arm-linux-gnueabihf-gcc
+	CFLAGS += -static -mfpu=neon -mcpu=cortex-a9
+	QEMU = qemu-arm -cpu cortex-a9
+else
+	CC = gcc
+	QEMU =
+endif
+
+# Sources and targets
 SRCS := $(wildcard tests/*.c)
 BINS := $(patsubst tests/%.c,build/%,$(SRCS))
 
@@ -13,7 +23,7 @@ build:
 	mkdir -p $@
 
 run: all
-	@for t in $(BINS); do echo "-> $$t"; $$t; echo; done
+	@for t in $(BINS); do echo "-> $$t"; $(QEMU) $$t; echo; done
 
 clean:
 	rm -rf build

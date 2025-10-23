@@ -7,7 +7,7 @@ Enter our build-environment:
 
 ### Commands
 Build and run tests:
-`make run`
+`make run` or `make arm=1 run`
 
 Remove all build files:
 `make clean`
