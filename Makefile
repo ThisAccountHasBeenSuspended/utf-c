@@ -7,6 +7,7 @@ ifeq ($(arm),1)
 	QEMU = qemu-arm -cpu cortex-a9
 else
 	CC = gcc
+	CFLAGS += -mavx2 -mavx512bw
 	QEMU =
 endif
 

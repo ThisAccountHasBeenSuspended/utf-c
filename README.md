@@ -1,3 +1,27 @@
+> [!IMPORTANT]
+> UTF-C is a hobby project for the simple compression of UTF-8 strings with non-ASCII characters. This project is not a standard!
+
+> [!TIP]
+> This project supports SSE2, AVX2, AVX512 and NEON.
+>
+> To use SIMD, please define:
+> - "UTFC_SIMD_128" for SSE2/NEON
+> - "UTFC_SIMD_256" for AVX2
+> - "UTFC_SIMD_512" for AVX512
+
+Example:
+```
+                             ┌──[24 bits]┬Second bit
+                     ┌[000000xx][32 bits]┼Both bits together
+                     │       │├─[16 bits]┴First bit
+                     │       └┴Additional bytes for the length
+┌──────────┬───┬───┬─┴─┬────┬───────────────────────────────────────────┐
+│ 55 38 43 │ ? │ ? │ 0 │ 24 │ D7 90 A0 99 20 90 95 94 91 20 90 95 aa 9a │
+├──────────┼───┴───┼───┴────┼[14 bytes]─────────────────────────────────┘
+└Magic     └Major  ├Flags   ├"אני אוהב אותך" (24 bytes)
+              Minor┘  Length┘
+```
+
 ## 🐳 Test
 Create an image for our build-environment:
 `docker build . -t utfc-buildenv`
