@@ -14,9 +14,9 @@ Example:
                              ┌──[24 bits]┬Second bit
                      ┌[000000xx][32 bits]┼Both bits together
                      │       │├─[16 bits]┴First bit
-                     │       └┴Additional bytes for the length
+                     │       └┴Additional bytes & total bits of length
 ┌──────────┬───┬───┬─┴─┬────┬───────────────────────────────────────────┐
-│ 55 38 43 │ ? │ ? │ 0 │ 24 │ D7 90 A0 99 20 90 95 94 91 20 90 95 aa 9a │
+│ 55 38 43 │ ? │ ? │ 0 │ 24 │ D7 90 A0 99 20 90 95 94 91 20 90 95 AA 9A │
 ├──────────┼───┴───┼───┴────┼[14 bytes]─────────────────────────────────┘
 └Magic     └Major  ├Flags   ├"אני אוהב אותך" (24 bytes)
               Minor┘  Length┘
