@@ -69,7 +69,7 @@
 
 #define UTFC__MAGIC_LEN 3
 #define UTFC__MAJOR 0
-#define UTFC__MINOR 0
+#define UTFC__MINOR 1
 #define UTFC__PATCH 0
 #define UTFC__MIN_HEADER_LEN 7 // Magic(3) + Major(1) + Minor(1) + Flags(1) + Length(1)
 #define UTFC__MAX_CHAR_LEN 4
