@@ -374,6 +374,68 @@ static UTFC__HEADER utfc__read_header(const char *data, size_t len) {
     return header;
 }
 
+static bool utfc__compression(UTFC_RESULT *result, const char *data, size_t len) {
+    char *cached_prefix = NULL;
+    uint8_t cached_prefix_len = 0;
+
+    size_t read_pos = 0;
+    while (read_pos < len) {
+        const uint8_t char_len = utfc__char_len(data, len, read_pos);
+        if (char_len == 0) {
+            // Something is wrong with the next char, so we return
+            // the maximum of 4 checked bytes as the value to check them.
+            result->error = UTFC_ERROR_INVALID_BYTE;
+
+            // No longer needed.
+            // Instead, we use the pointer starting at `read_pos`.
+            free(result->value);
+
+            size_t remaining_bytes = (len - read_pos);
+            if (remaining_bytes > UTFC__MAX_CHAR_LEN) {
+                remaining_bytes = UTFC__MAX_CHAR_LEN;
+            }
+            result->len = remaining_bytes;
+            result->value = (char *)&data[read_pos];
+
+            return false;
+        }
+
+        const uint8_t prefix_len = (char_len - 1);
+        if (prefix_len > 0) {
+            bool prefix_changed = (prefix_len != cached_prefix_len);
+
+            // If the length is not different, we check if the bytes are identical.
+            if (!prefix_changed) {
+                if (memcmp(cached_prefix, &data[read_pos], prefix_len) != 0) {
+                    prefix_changed = true;
+                }
+            }
+
+            // When we have a new prefix, it is cached and written.
+            if (prefix_changed) {
+                cached_prefix = (char *)&data[read_pos];
+                cached_prefix_len = prefix_len;
+
+                memcpy(&result->value[result->len], &data[read_pos], prefix_len);
+                result->len += prefix_len;
+            }
+
+            read_pos += prefix_len;
+        }
+        // If the next byte is also ASCII, we use SIMD to find the next
+        // non-ASCII byte and efficiently copy everything up to that index.
+        else if ((read_pos + 1) < len && (data[read_pos + 1] & 0x80) == 0) {
+            const bool ha_result = utfc__handle_ascii(result, data, len, &read_pos);
+            if (ha_result) break;
+            continue;
+        }
+
+        result->value[result->len++] = data[read_pos++];
+    }
+
+    return true;
+}
+
 /* ==================== #!PUBLIC!# ==================== */
 
 inline void utfc_result_deinit(UTFC_RESULT *result) {
@@ -405,67 +467,11 @@ UTFC_RESULT utfc_compress(const char *data, size_t len) {
         return result;
     }
 
-    char *cached_prefix = NULL;
-    uint8_t cached_prefix_len = 0;
-
-    size_t read_pos = 0;
-    while (read_pos < len) {
-        const uint8_t char_len = utfc__char_len(data, len, read_pos);
-        if (char_len == 0) {
-            // Something is wrong with the next char, so we return
-            // the maximum of 4 checked bytes as the value to check them.
-            result.error = UTFC_ERROR_INVALID_BYTE;
-
-            // No longer needed.
-            // Instead, we use the pointer starting at `read_pos`.
-            free(result.value);
-
-            size_t remaining_bytes = (len - read_pos);
-            if (remaining_bytes > UTFC__MAX_CHAR_LEN) {
-                remaining_bytes = UTFC__MAX_CHAR_LEN;
-            }
-            result.len = remaining_bytes;
-            result.value = (char *)&data[read_pos];
-
-            return result;
+    if (utfc__compression(&result, data, len)) {
+        const char *resized_value = (char *)realloc(result.value, result.len);
+        if (resized_value != NULL) {
+            result.value = (char *)resized_value;
         }
-
-        const uint8_t prefix_len = (char_len - 1);
-        if (prefix_len > 0) {
-            bool prefix_changed = (prefix_len != cached_prefix_len);
-
-            // If the length is not different, we check if the bytes are identical.
-            if (!prefix_changed) {
-                if (memcmp(cached_prefix, &data[read_pos], prefix_len) != 0) {
-                    prefix_changed = true;
-                }
-            }
-
-            // When we have a new prefix, it is cached and written.
-            if (prefix_changed) {
-                cached_prefix = (char *)&data[read_pos];
-                cached_prefix_len = prefix_len;
-
-                memcpy(&result.value[result.len], &data[read_pos], prefix_len);
-                result.len += prefix_len;
-            }
-
-            read_pos += prefix_len;
-        }
-        // If the next byte is also ASCII, we use SIMD to find the next
-        // non-ASCII byte and efficiently copy everything up to that index.
-        else if ((read_pos + 1) < len && (data[read_pos + 1] & 0x80) == 0) {
-            const bool ha_result = utfc__handle_ascii(&result, data, len, &read_pos);
-            if (ha_result) break;
-            continue;
-        }
-
-        result.value[result.len++] = data[read_pos++];
-    }
-
-    const char *resized_value = (const char *)realloc(result.value, result.len);
-    if (resized_value != NULL) {
-        result.value = (char *)resized_value;
     }
 
     return result;

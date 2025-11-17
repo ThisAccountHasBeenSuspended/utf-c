@@ -11,8 +11,9 @@
 
 Example:
 ```
-                             ┌──[24 bits]┬Second bit
-                     ┌[000000xx][32 bits]┼Both bits together
+                            ┌Prefix reducer
+                            │┌──[24 bits]┬Second bit
+                     ┌[00000xxx][32 bits]┼Both bits together
                      │       │├─[16 bits]┴First bit
                      │       └┴Additional bytes & total bits of length
 ┌──────────┬───┬───┬─┴─┬────┬───────────────────────────────────────────┐
