@@ -124,10 +124,11 @@ typedef struct {
 } UTFC_RESULT;
 
 typedef struct {
+    size_t *positions;
+    size_t len, cap;
     /// A value consists of the length (maximum 3 | 8 bits)
     /// and the maximum 3 bytes of the prefix (8 bits each).
     uint32_t *values;
-    size_t len, cap;
 } UTFC__PREFIX_MAP;
 
 /* ==================== #!PRIVATE!# ==================== */
@@ -136,11 +137,13 @@ static bool utfc__prefix_map_init(UTFC__PREFIX_MAP *map) {
     // Already initialized.
     if (map->cap > 0) return true;
 
-    uint32_t *tmp = (uint32_t *)malloc(5 * sizeof(*tmp));
-    if (tmp == NULL) return false;
+    uint32_t *tmp_values = (uint32_t *)malloc(5 * sizeof(*tmp_values));
+    size_t *tmp_positions = (size_t *)malloc(5 * sizeof(*tmp_positions));
+    if (tmp_values == NULL || tmp_positions == NULL) return false;
 
     map->cap = 5;
-    map->values = tmp;
+    map->values = tmp_values;
+    map->positions = tmp_positions;
     return true;
 }
 
@@ -150,6 +153,10 @@ static void utfc__prefix_map_deinit(UTFC__PREFIX_MAP *map) {
     if (map->values != NULL) {
         free(map->values);
         map->values = NULL;
+    }
+    if (map->positions != NULL) {
+        free(map->positions);
+        map->positions = NULL;
     }
 }
 
@@ -165,19 +172,23 @@ static void utfc__prefix_unpack(uint32_t value, char *prefix_out, uint8_t *len_o
     memcpy(prefix_out, &value, 3);
 }
 
-static bool utfc__prefix_map_add(UTFC__PREFIX_MAP *map, const char *prefix, size_t len) {
+static bool utfc__prefix_map_add(UTFC__PREFIX_MAP *map, const char *prefix, size_t len, size_t position) {
     if (map->cap == 0 || map->values == NULL) return false;
 
     if (map->len == map->cap) {
-        uint32_t *tmp = (uint32_t *)realloc(map->values, (map->len + (5 * sizeof(*tmp))));
-        if (tmp == NULL) return false;
+        uint32_t *tmp_values = (uint32_t *)realloc(map->values, (map->cap + (5 * sizeof(*tmp_values))));
+        size_t *tmp_positions = (size_t *)realloc(map->positions, (map->cap + (5 * sizeof(*tmp_positions))));
+        if (tmp_values == NULL || tmp_positions == NULL) return false;
 
         map->cap += 5;
-        map->values = tmp;
+        map->values = tmp_values;
+        map->positions = tmp_positions;
     }
 
-    uint32_t new_value = utfc__prefix_pack(prefix, len);
-    map->values[map->len++] = new_value;
+    uint32_t value = utfc__prefix_pack(prefix, len);
+    map->values[map->len] = value;
+    map->positions[map->len] = position;
+    map->len++;
 
     return true;
 }
