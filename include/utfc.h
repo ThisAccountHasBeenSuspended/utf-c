@@ -123,7 +123,64 @@ typedef struct {
     uint8_t error;
 } UTFC_RESULT;
 
+typedef struct {
+    /// A value consists of the length (maximum 3 | 8 bits)
+    /// and the maximum 3 bytes of the prefix (8 bits each).
+    uint32_t *values;
+    size_t len, cap;
+} UTFC__PREFIX_MAP;
+
 /* ==================== #!PRIVATE!# ==================== */
+
+static bool utfc__prefix_map_init(UTFC__PREFIX_MAP *map) {
+    // Already initialized.
+    if (map->cap > 0) return true;
+
+    uint32_t *tmp = (uint32_t *)malloc(5 * sizeof(*tmp));
+    if (tmp == NULL) return false;
+
+    map->cap = 5;
+    map->values = tmp;
+    return true;
+}
+
+static void utfc__prefix_map_deinit(UTFC__PREFIX_MAP *map) {
+    map->cap = 0;
+    map->len = 0;
+    if (map->values != NULL) {
+        free(map->values);
+        map->values = NULL;
+    }
+}
+
+static uint32_t utfc__prefix_pack(const char *prefix, size_t len) {
+    uint32_t result = 0;
+    memcpy(&result, prefix, 3);
+    result |= ((uint32_t)len << 24);
+    return result;
+}
+
+static void utfc__prefix_unpack(uint32_t value, char *prefix_out, uint8_t *len_out) {
+    *len_out = (uint8_t)(value >> 24);
+    memcpy(prefix_out, &value, 3);
+}
+
+static bool utfc__prefix_map_add(UTFC__PREFIX_MAP *map, const char *prefix, size_t len) {
+    if (map->cap == 0 || map->values == NULL) return false;
+
+    if (map->len == map->cap) {
+        uint32_t *tmp = (uint32_t *)realloc(map->values, (map->len + (5 * sizeof(*tmp))));
+        if (tmp == NULL) return false;
+
+        map->cap += 5;
+        map->values = tmp;
+    }
+
+    uint32_t new_value = utfc__prefix_pack(prefix, len);
+    map->values[map->len++] = new_value;
+
+    return true;
+}
 
 static bool utfc__next_non_ascii(const char *value, size_t len, size_t idx, size_t *out) {
     if (idx >= len) {
