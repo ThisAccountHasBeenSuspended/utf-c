@@ -75,8 +75,14 @@
 #define UTFC__MAX_CHAR_LEN 4
 #define UTFC__RESERVED_LEN 50
 #define UTFC__MAX_DATA_LEN (UINT32_MAX - UTFC__RESERVED_LEN)
+#if !defined(UTFC__PREFIX_REDUCER_THRESHOLD)
+    #define UTFC__PREFIX_REDUCER_THRESHOLD 5
+#endif
+#define UTFC__MAX_PREFIX_MARKERS 13
 
 static const char UTFC__MAGIC_BYTES[] = { 'U', '8', 'C' };
+/// Guaranteed unused bytes in UTF-8. (Perfect for markers)
+static const char UTFC__PREFIX_MARKERS[UTFC__MAX_PREFIX_MARKERS] = { 0xC0, 0xC1, 0xF5, 0xF6, 0xF7, 0xF8, 0xF9, 0xFA, 0xFB, 0xFC, 0xFD, 0xFE, 0xFF };
 
 enum {
     /// No error.
@@ -110,6 +116,10 @@ enum {
     UTFC__EXTRA_LENGTH_BYTES_3 = 3,
 };
 
+enum {
+    UTFC__FLAG_PREFIX_REDUCER = 0b00000100,
+};
+
 typedef struct {
     uint32_t data_len;
     uint8_t error;
@@ -138,18 +148,21 @@ static bool utfc__prefix_map_init(UTFC__PREFIX_MAP *map) {
     if (map->cap > 0) return true;
 
     uint32_t *tmp_values = (uint32_t *)malloc(5 * sizeof(*tmp_values));
-    size_t *tmp_positions = (size_t *)malloc(5 * sizeof(*tmp_positions));
-    if (tmp_values == NULL || tmp_positions == NULL) return false;
+    if (tmp_values == NULL) return false;
 
-    map->cap = 5;
+    size_t *tmp_positions = (size_t *)malloc(5 * sizeof(*tmp_positions));
+    if (tmp_positions == NULL) {
+        if (tmp_values != NULL) free(tmp_values);
+        return false;
+    }
+
     map->values = tmp_values;
     map->positions = tmp_positions;
+    map->cap = 5;
     return true;
 }
 
 static void utfc__prefix_map_deinit(UTFC__PREFIX_MAP *map) {
-    map->cap = 0;
-    map->len = 0;
     if (map->values != NULL) {
         free(map->values);
         map->values = NULL;
@@ -158,39 +171,41 @@ static void utfc__prefix_map_deinit(UTFC__PREFIX_MAP *map) {
         free(map->positions);
         map->positions = NULL;
     }
+    map->cap = 0;
+    map->len = 0;
 }
 
-static uint32_t utfc__prefix_pack(const char *prefix, size_t len) {
+static inline uint32_t utfc__prefix_pack(const char *prefix, uint8_t len) {
     uint32_t result = 0;
     memcpy(&result, prefix, 3);
     result |= ((uint32_t)len << 24);
     return result;
 }
 
-static void utfc__prefix_unpack(uint32_t value, char *prefix_out, uint8_t *len_out) {
+static inline void utfc__prefix_unpack(uint32_t value, char *prefix_out, uint8_t *len_out) {
     *len_out = (uint8_t)(value >> 24);
     memcpy(prefix_out, &value, 3);
 }
 
-static bool utfc__prefix_map_add(UTFC__PREFIX_MAP *map, const char *prefix, size_t len, size_t position) {
-    if (map->cap == 0 || map->values == NULL) return false;
+static void utfc__prefix_map_add(UTFC__PREFIX_MAP *map, const char *prefix, uint8_t len, size_t position) {
+    if (map->cap == 0 || map->values == NULL || map->positions == NULL) return;
 
     if (map->len == map->cap) {
-        uint32_t *tmp_values = (uint32_t *)realloc(map->values, (map->cap + (5 * sizeof(*tmp_values))));
-        size_t *tmp_positions = (size_t *)realloc(map->positions, (map->cap + (5 * sizeof(*tmp_positions))));
-        if (tmp_values == NULL || tmp_positions == NULL) return false;
+        uint32_t *tmp_values = (uint32_t *)realloc(map->values, ((map->cap + 5) * sizeof(*tmp_values)));
+        if (tmp_values == NULL) return;
+        map->values = tmp_values;
+
+        size_t *tmp_positions = (size_t *)realloc(map->positions, ((map->cap + 5) * sizeof(*tmp_positions)));
+        if (tmp_positions == NULL) return;
+        map->positions = tmp_positions;
 
         map->cap += 5;
-        map->values = tmp_values;
-        map->positions = tmp_positions;
     }
 
     uint32_t value = utfc__prefix_pack(prefix, len);
     map->values[map->len] = value;
     map->positions[map->len] = position;
     map->len++;
-
-    return true;
 }
 
 static bool utfc__next_non_ascii(const char *value, size_t len, size_t idx, size_t *out) {
@@ -356,7 +371,7 @@ static bool utfc__write_header(UTFC_RESULT *result, size_t len) {
     }
 
     const size_t value_len = UTFC__MIN_HEADER_LEN + extra_length_bytes + len;
-    result->value = (char *)malloc(value_len);
+    result->value = (char *)malloc(value_len * sizeof(*result->value));
     if (result->value == NULL) {
         result->error = UTFC_ERROR_OUT_OF_MEMORY;
         return false;
@@ -442,7 +457,146 @@ static UTFC__HEADER utfc__read_header(const char *data, size_t len) {
     return header;
 }
 
-static bool utfc__compression(UTFC_RESULT *result, const char *data, size_t len) {
+static void utfc__prefix_reducer_pick_values(const UTFC__PREFIX_MAP *prefix_map, uint32_t **out, uint8_t *out_len) {
+    // We limit the number of different prefixes to a maximum of 32.
+    uint8_t max_values = prefix_map->len;
+    if (max_values > 32) max_values = 32;
+
+    // Should the allocation fail, we will finish successfully without reduced prefixes.
+    uint32_t *values = (uint32_t *)malloc(max_values * sizeof(*values));
+    if (values == NULL) return;
+    size_t *value_count = (size_t *)malloc(max_values * sizeof(*value_count));
+    if (value_count == NULL) {
+        if (values != NULL) free(values);
+        return;
+    }
+
+    // Pick new prefixes and count.
+    uint8_t len = 0;
+    for (uint8_t i = 0; i < prefix_map->len && len < max_values; i++) {
+        uint32_t v = prefix_map->values[i];
+
+        bool found = false;
+        for (uint8_t j = 0; j < len; ++j) {
+            if (values[j] == v) {
+                value_count[j]++;;
+                found = true;
+                break;
+            }
+        }
+
+        if (!found) {
+            value_count[len] = 1;
+            values[len++] = v;
+        }
+    }
+
+    // Sort in descending order.
+    for (size_t i = 0; (i + 1) < len; ++i) {
+        for (size_t j = (i + 1); j < len; ++j) {
+            if (value_count[j] > value_count[i]) {
+                size_t tmp_value = value_count[i];
+                // Swap counts
+                value_count[i] = value_count[j];
+                value_count[j] = tmp_value;
+                // Swap values
+                tmp_value = (size_t)values[i];
+                values[i] = values[j];
+                values[j] = (uint32_t)tmp_value;
+            }
+        }
+    }
+
+    free(value_count);
+
+    // We cannot process more than we have.
+    if (len > UTFC__MAX_PREFIX_MARKERS) {
+        len = UTFC__MAX_PREFIX_MARKERS;
+    }
+
+    *out = values;
+    *out_len = len;
+}
+
+static bool utfc__prefix_reducer(UTFC_RESULT *result, const UTFC__PREFIX_MAP *prefix_map) {
+    // A reduction below 5 would be too inefficient.
+    if (prefix_map->len < UTFC__PREFIX_REDUCER_THRESHOLD) return true;
+
+    bool failed = true;
+
+    uint32_t *picked_values = NULL;
+    uint8_t picked_values_len = 0;
+    utfc__prefix_reducer_pick_values(prefix_map, &picked_values, &picked_values_len);
+    if (picked_values == NULL) return true;
+
+    /* ====== REMOVE ====== */
+    size_t removed_bytes = 0;
+    for (size_t i = prefix_map->len; i-- > 0;) {
+        int8_t marker = -1;
+        for (uint8_t j = 0; j < picked_values_len; j++) {
+            if (picked_values[j] == prefix_map->values[i]) {
+                marker = j;
+                break;
+            }
+        }
+
+        if (marker != -1) {
+            const size_t val = prefix_map->values[i];
+            const size_t pos = prefix_map->positions[i];
+
+            // The length is located in the high 8 bits of the value.
+            const uint8_t val_len = (uint8_t)(val >> 24);
+
+            // Change first prefix byte to marker.
+            result->value[pos] = UTFC__PREFIX_MARKERS[marker];
+
+            const size_t move_len = result->len - (pos + val_len);
+            memmove(&result->value[pos + 1], &result->value[pos + val_len], move_len);
+            removed_bytes += (val_len - 1);
+        }
+    }
+    result->len -= removed_bytes;
+
+    /* ====== ADD ====== */
+    result->value[5] |= UTFC__FLAG_PREFIX_REDUCER; // Set "Prefix reducer"-flag
+    const uint8_t header_len = UTFC__MIN_HEADER_LEN + (result->value[5] & 0b00000011);
+
+    // Set the byte for the length of the reduced prefixes directly after the header.
+    memmove(&result->value[header_len + 1], &result->value[header_len], (result->len - header_len));
+    result->len += 1;
+    result->value[header_len] = picked_values_len;
+
+    // A prefix consists of up to 3 bytes.
+    // We add (3 * picked_values_len) to ensure sufficient capacity.
+    const size_t realloc_size = (result->len + (3 * picked_values_len));
+    char *new_value = (char *)realloc(result->value, realloc_size * sizeof(*new_value));
+    if (new_value != NULL) {
+        result->value = new_value;
+
+        for (uint8_t i = picked_values_len; i-- > 0;) {
+            char prefix[3] = { 0 };
+            uint8_t prefix_len = 0;
+            utfc__prefix_unpack(picked_values[i], prefix, &prefix_len);
+
+            const size_t from = header_len + 1;
+            const size_t to = from + prefix_len;
+
+            memmove(&result->value[to], &result->value[from], (result->len - from));
+            for (uint8_t j = 0; j < prefix_len; j++) {
+                result->value[from + j] = prefix[j];
+            }
+            result->len += prefix_len;
+        }
+
+        failed = false;
+    }
+
+    free(picked_values);
+
+    return !failed;
+}
+
+static bool utfc__compression(UTFC_RESULT *result, UTFC__PREFIX_MAP *prefix_map, const char *data, size_t len) {
     char *cached_prefix = NULL;
     uint8_t cached_prefix_len = 0;
 
@@ -483,6 +637,8 @@ static bool utfc__compression(UTFC_RESULT *result, const char *data, size_t len)
             if (prefix_changed) {
                 cached_prefix = (char *)&data[read_pos];
                 cached_prefix_len = prefix_len;
+
+                utfc__prefix_map_add(prefix_map, cached_prefix, cached_prefix_len, result->len);
 
                 memcpy(&result->value[result->len], &data[read_pos], prefix_len);
                 result->len += prefix_len;
@@ -535,12 +691,28 @@ UTFC_RESULT utfc_compress(const char *data, size_t len) {
         return result;
     }
 
-    if (utfc__compression(&result, data, len)) {
-        const char *resized_value = (char *)realloc(result.value, result.len);
-        if (resized_value != NULL) {
-            result.value = (char *)resized_value;
+    UTFC__PREFIX_MAP prefix_map = { 0 };
+    if (!utfc__prefix_map_init(&prefix_map)) {
+        result.error = UTFC_ERROR_OUT_OF_MEMORY;
+        return result;
+    }
+
+    bool failed = false;
+    if (utfc__compression(&result, &prefix_map, data, len)) {
+        if (!utfc__prefix_reducer(&result, &prefix_map)) {
+            failed = true;
+        }
+
+        if (failed) {
+            // Compression will only fail if something went wrong with the memory.
+            result.error = UTFC_ERROR_OUT_OF_MEMORY;
+        } else {
+            const char *resized_value = (char *)realloc(result.value, result.len * sizeof(*resized_value));
+            if (resized_value != NULL) result.value = (char *)resized_value;
         }
     }
+
+    utfc__prefix_map_deinit(&prefix_map);
 
     return result;
 }
@@ -559,7 +731,7 @@ UTFC_RESULT utfc_decompress(const char *data, size_t len, bool terminate) {
     }
 
     // If terminate = 1 we allocate one more to terminate it with a '\0'.
-    result.value = (char *)malloc(header.data_len + (terminate == false ? 0 : 1));
+    result.value = (char *)malloc((header.data_len + (terminate == false ? 0 : 1)) * sizeof(*result.value));
     if (result.value == NULL) {
         result.error = UTFC_ERROR_OUT_OF_MEMORY;
         return result;
