@@ -59,13 +59,12 @@
 #include <stdbool.h>
 #include <string.h>
 
+#if defined(_MSC_VER)
+    #include <intrin.h>
+#endif
+
 #if defined(UTFC__X86)
-    // Instructions for SSE|AVX.
     #include <immintrin.h>
-    #if defined(_MSC_VER)
-        // MS-specific instrinsics.
-        #include <intrin.h>
-    #endif
 #elif defined(UTFC__ARM)
     #include <arm_neon.h>
 #endif
@@ -78,8 +77,19 @@
 #define UTFC__MAX_CHAR_LEN 4
 #define UTFC__RESERVED_LEN 500
 #define UTFC__MAX_DATA_LEN (UINT32_MAX - UTFC__RESERVED_LEN)
+// This is the minimum value of various prefixes for a reduction.
+// A value below 5 is inefficient and not recommended.
+// To disable "Prefix reducer", set the value to `UINT32_MAX` or higher.
 #if !defined(UTFC__PREFIX_REDUCER_THRESHOLD)
     #define UTFC__PREFIX_REDUCER_THRESHOLD 5
+#endif
+// This is the limit of different prefixes that can be selected for sorting.
+#if !defined(UTFC__PREFIX_REDUCER_STACK_LIMIT)
+    #define UTFC__PREFIX_REDUCER_STACK_LIMIT 24
+#elif (UTFC__PREFIX_REDUCER_STACK_LIMIT == 0) || (UTFC__PREFIX_REDUCER_STACK_LIMIT > 48)
+    #warning "`UTFC__PREFIX_REDUCER_STACK_LIMIT` is invalid and has been changed to `32`"
+    #undef UTFC__PREFIX_REDUCER_STACK_LIMIT
+    #define UTFC__PREFIX_REDUCER_STACK_LIMIT 32
 #endif
 #define UTFC__MAX_PREFIX_MARKERS 13
 
@@ -221,6 +231,7 @@ static bool utfc__prefix_map_init(utfc__prefix_map *map) {
 }
 
 static void utfc__prefix_map_deinit(utfc__prefix_map *map) {
+    map->cap = 0;
     if (map->values != NULL) {
         free(map->values);
         map->values = NULL;
@@ -229,7 +240,6 @@ static void utfc__prefix_map_deinit(utfc__prefix_map *map) {
         free(map->indices);
         map->indices = NULL;
     }
-    map->cap = 0;
     map->len = 0;
 }
 
@@ -246,16 +256,16 @@ static inline void utfc__prefix_unpack(uint32_t value, char *prefix_out, uint8_t
 }
 
 static void utfc__prefix_map_add(utfc__prefix_map *map, const char *prefix, uint8_t len, size_t idx) {
-    if (map->cap == 0 || map->values == NULL || map->indices == NULL) return;
+    if (map->cap == 0) return;
 
     if (map->len == map->cap) {
-        uint32_t *tmp_values = (uint32_t *)realloc(map->values, ((map->cap + 5) * sizeof(*tmp_values)));
+        const uint32_t *tmp_values = (uint32_t *)realloc(map->values, ((map->cap + 5) * sizeof(*tmp_values)));
         if (tmp_values == NULL) return;
-        map->values = tmp_values;
+        map->values = (uint32_t *)tmp_values;
 
-        size_t *tmp_indices = (size_t *)realloc(map->indices, ((map->cap + 5) * sizeof(*tmp_indices)));
+        const size_t *tmp_indices = (size_t *)realloc(map->indices, ((map->cap + 5) * sizeof(*tmp_indices)));
         if (tmp_indices == NULL) return;
-        map->indices = tmp_indices;
+        map->indices = (size_t *)tmp_indices;
 
         map->cap += 5;
     }
@@ -492,78 +502,61 @@ static utfc__header utfc__read_header(const char *data, size_t len) {
     return header;
 }
 
-static void utfc__pick_prefix_values(const utfc__prefix_map *prefix_map, uint32_t **out, uint8_t *out_len) {
-    // We limit the number of different prefixes to a maximum of 32.
+static void utfc__pick_prefix_values(const utfc__prefix_map *prefix_map, uint32_t *out, uint8_t *out_len) {
     uint8_t max_values = prefix_map->len;
-    if (max_values > 32) max_values = 32;
-
-    // Should the allocation fail, we will finish successfully without reduced prefixes.
-    uint32_t *values = (uint32_t *)malloc(max_values * sizeof(*values));
-    if (values == NULL) return;
-    size_t *value_count = (size_t *)malloc(max_values * sizeof(*value_count));
-    if (value_count == NULL) {
-        if (values != NULL) free(values);
-        return;
+    if (max_values > UTFC__PREFIX_REDUCER_STACK_LIMIT) {
+        max_values = UTFC__PREFIX_REDUCER_STACK_LIMIT;
     }
 
+    size_t value_count[UTFC__PREFIX_REDUCER_STACK_LIMIT] = { 1 };
+
     // Pick new prefixes and count.
-    uint8_t len = 0;
-    for (size_t i = 0; i < prefix_map->len && len < max_values; i++) {
-        uint32_t value = prefix_map->values[i];
+    for (size_t i = 0; i < prefix_map->len && *out_len < max_values; i++) {
+        const uint32_t value = prefix_map->values[i];
 
         bool found = false;
-        for (uint8_t j = 0; j < len; ++j) {
-            if (values[j] == value) {
-                value_count[j]++;;
+        for (uint8_t j = 0; j < *out_len; ++j) {
+            if (out[j] == value) {
+                value_count[j]++;
                 found = true;
                 break;
             }
         }
 
         if (!found) {
-            value_count[len] = 1;
-            values[len] = value;
-            len += 1;
+            out[*out_len] = value;
+            *out_len += 1;
         }
     }
 
     // Sort in descending order.
-    for (size_t i = 0; (i + 1) < len; ++i) {
-        for (size_t j = (i + 1); j < len; ++j) {
+    for (size_t i = 0; (i + 1) < *out_len; ++i) {
+        for (size_t j = (i + 1); j < *out_len; ++j) {
             if (value_count[j] > value_count[i]) {
                 size_t tmp_value = value_count[i];
                 // Swap counts
                 value_count[i] = value_count[j];
                 value_count[j] = tmp_value;
                 // Swap values
-                tmp_value = (size_t)values[i];
-                values[i] = values[j];
-                values[j] = (uint32_t)tmp_value;
+                tmp_value = (size_t)out[i];
+                out[i] = out[j];
+                out[j] = (uint32_t)tmp_value;
             }
         }
     }
 
-    free(value_count);
-
     // We cannot exceed the limit.
-    if (len > UTFC__MAX_PREFIX_MARKERS) {
-        len = UTFC__MAX_PREFIX_MARKERS;
+    if (*out_len > UTFC__MAX_PREFIX_MARKERS) {
+        *out_len = UTFC__MAX_PREFIX_MARKERS;
     }
-
-    *out = values;
-    *out_len = len;
 }
 
 static bool utfc__prefix_reducer(utfc_result *result, const utfc__prefix_map *prefix_map) {
-    // A reduction below 5 would be too inefficient.
     if (prefix_map->len < UTFC__PREFIX_REDUCER_THRESHOLD) return true;
 
-    bool failed = true; // Reversed return value
-
-    uint32_t *picked_values = NULL;
+    uint32_t picked_values[UTFC__PREFIX_REDUCER_STACK_LIMIT] = { 0 };
     uint8_t picked_values_len = 0;
-    utfc__pick_prefix_values(prefix_map, &picked_values, &picked_values_len);
-    if (picked_values == NULL) return true;
+    utfc__pick_prefix_values(prefix_map, picked_values, &picked_values_len);
 
     // Set header flag.
     result->value[UTFC__HEADER_IDX_FLAGS] |= UTFC__FLAG_PREFIX_REDUCER;
@@ -580,7 +573,7 @@ static bool utfc__prefix_reducer(utfc_result *result, const utfc__prefix_map *pr
         }
 
         if (marker != -1) {
-            const size_t val = prefix_map->values[i];
+            const uint32_t val = prefix_map->values[i];
             const size_t idx = prefix_map->indices[i];
 
             // The length is located in the high 8 bits of the value.
@@ -589,7 +582,7 @@ static bool utfc__prefix_reducer(utfc_result *result, const utfc__prefix_map *pr
             // Change first prefix byte to marker.
             result->value[idx] = UTFC__PREFIX_MARKERS[marker];
 
-            const size_t move_len = result->len - (idx + val_len);
+            const size_t move_len = (result->len - (idx + val_len));
             memmove(&result->value[idx + 1], &result->value[idx + val_len], move_len);
             removed_bytes += (val_len - 1);
         }
@@ -607,35 +600,30 @@ static bool utfc__prefix_reducer(utfc_result *result, const utfc__prefix_map *pr
     // A prefix consists of up to 3 bytes.
     // We add (3 * picked_values_len) to ensure sufficient capacity.
     const size_t realloc_size = (result->len + (3 * picked_values_len));
-    char *new_value = (char *)realloc(result->value, realloc_size * sizeof(*new_value));
-    if (new_value != NULL) {
-        result->value = new_value;
+    const char *new_value = (char *)realloc(result->value, realloc_size * sizeof(*new_value));
+    if (new_value == NULL) return false;
+    result->value = (char *)new_value;
 
-        for (uint8_t i = picked_values_len; i-- > 0;) {
-            char prefix[3] = { 0 };
-            uint8_t prefix_len = 0;
-            utfc__prefix_unpack(picked_values[i], prefix, &prefix_len);
+    for (uint8_t i = picked_values_len; i-- > 0;) {
+        char prefix[3] = { 0 };
+        uint8_t prefix_len = 0;
+        utfc__prefix_unpack(picked_values[i], prefix, &prefix_len);
 
-            const size_t from = header_len + 1;
-            const size_t to = from + prefix_len;
+        const size_t from = (header_len + 1);
+        const size_t to = (from + prefix_len);
 
-            memmove(&result->value[to], &result->value[from], (result->len - from));
-            for (uint8_t j = 0; j < prefix_len; j++) {
-                result->value[from + j] = prefix[j];
-            }
-            result->len += prefix_len;
+        memmove(&result->value[to], &result->value[from], (result->len - from));
+        for (uint8_t j = 0; j < prefix_len; j++) {
+            result->value[from + j] = prefix[j];
         }
-
-        failed = false;
+        result->len += prefix_len;
     }
 
-    free(picked_values);
-
-    return !failed;
+    return true;
 }
 
 static bool utfc__compression(utfc_result *result, utfc__prefix_map *prefix_map, const char *data, size_t len) {
-    char *cached_prefix = NULL;
+    size_t cached_prefix_idx = 0;
     uint8_t cached_prefix_len = 0;
 
     size_t read_idx = 0;
@@ -666,17 +654,17 @@ static bool utfc__compression(utfc_result *result, utfc__prefix_map *prefix_map,
 
             // If the length is not different, we check if the bytes are identical.
             if (!prefix_changed) {
-                if (memcmp(cached_prefix, &data[read_idx], prefix_len) != 0) {
+                if (memcmp(&data[cached_prefix_idx], &data[read_idx], prefix_len) != 0) {
                     prefix_changed = true;
                 }
             }
 
             // When we have a new prefix, it is cached and written.
             if (prefix_changed) {
-                cached_prefix = (char *)&data[read_idx];
+                cached_prefix_idx = read_idx;
                 cached_prefix_len = prefix_len;
 
-                utfc__prefix_map_add(prefix_map, cached_prefix, cached_prefix_len, result->len);
+                utfc__prefix_map_add(prefix_map, &data[cached_prefix_idx], cached_prefix_len, result->len);
 
                 memcpy(&result->value[result->len], &data[read_idx], prefix_len);
                 result->len += prefix_len;
