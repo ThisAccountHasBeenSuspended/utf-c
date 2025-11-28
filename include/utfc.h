@@ -43,6 +43,9 @@
 
 #if defined(__x86_64__) || defined(_M_X64) || defined(_M_AMD64) || defined(__i386__) || defined(_M_IX86)
     #define UTFC__X86 1
+    #if defined(__BMI__) || (defined(_MSC_VER) && defined(__AVX2__))
+        #define UTFC__BMI_INTRINSICS 1
+    #endif
 #elif defined(__aarch64__) || defined(_M_ARM64) || defined(__arm__) || defined(_M_ARM)
     #define UTFC__ARM 1
 #endif
@@ -186,7 +189,7 @@ static inline uint8_t utfc__zero_bits_count(size_t mask) {
     if (mask == 0) return 0;
     size_t result;
     #if defined(_MSC_VER)
-        #if defined(UTFC_MODERN_INTRINSICS)
+        #if defined(UTFC__BMI_INTRINSICS)
             #if defined(UTFC_64BIT)
                 result = _tzcnt_u64(mask);
             #else
