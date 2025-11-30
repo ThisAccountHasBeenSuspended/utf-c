@@ -533,8 +533,8 @@ static void utfc__pick_prefix_values(const utfc__prefix_map *prefix_map, uint32_
     }
 
     // Sort in descending order.
-    for (size_t i = 0; (i + 1) < *out_len; ++i) {
-        for (size_t j = (i + 1); j < *out_len; ++j) {
+    for (uint8_t i = 0; (i + 1) < *out_len; ++i) {
+        for (uint8_t j = (i + 1); j < *out_len; ++j) {
             if (value_count[j] > value_count[i]) {
                 size_t tmp_value = value_count[i];
                 // Swap counts
@@ -552,6 +552,15 @@ static void utfc__pick_prefix_values(const utfc__prefix_map *prefix_map, uint32_
     if (*out_len > UTFC__MAX_PREFIX_MARKERS) {
         *out_len = UTFC__MAX_PREFIX_MARKERS;
     }
+
+    // After sorting, we only want prefixes with a `value_count` of at least 3.
+    // (A value below 3 is too inefficient)
+    for (uint8_t i = 0; i < *out_len; i++) {
+        if (value_count[i] < 3) {
+            *out_len = (i + 1);
+            break;
+        }
+    }
 }
 
 static bool utfc__prefix_reducer(utfc_result *result, const utfc__prefix_map *prefix_map) {
@@ -560,6 +569,7 @@ static bool utfc__prefix_reducer(utfc_result *result, const utfc__prefix_map *pr
     uint32_t picked_values[UTFC__PREFIX_REDUCER_STACK_LIMIT] = { 0 };
     uint8_t picked_values_len = 0;
     utfc__pick_prefix_values(prefix_map, picked_values, &picked_values_len);
+    if (picked_values_len == 0) return false;
 
     // Set header flag.
     result->value[UTFC__HEADER_IDX_FLAGS] |= UTFC__FLAG_PREFIX_REDUCER;
