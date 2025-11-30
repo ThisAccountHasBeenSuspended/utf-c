@@ -1,6 +1,9 @@
 > [!IMPORTANT]
 > UTF-C is a hobby project for the simple compression of UTF-8 strings with non-ASCII characters. This project is not a standard!
 
+> [!NOTE]
+> This project is a completely original work and does not follow any standards or templates. Contributions and improvements are welcome.
+
 > [!TIP]
 > This project supports SSE2, AVX2, AVX512 and NEON.
 >
@@ -11,8 +14,9 @@
 
 Example:
 ```
-                             ┌──[24 bits]┬Second bit
-                     ┌[000000xx][32 bits]┼Both bits together
+                            ┌Prefix reducer
+                            │┌──[24 bits]┬Second bit
+                     ┌[00000xxx][32 bits]┼Both bits together
                      │       │├─[16 bits]┴First bit
                      │       └┴Additional bytes & total bits of length
 ┌──────────┬───┬───┬─┴─┬────┬───────────────────────────────────────────┐
