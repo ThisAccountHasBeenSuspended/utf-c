@@ -787,7 +787,7 @@ utfc_result utfc_decompress(const char *data, size_t len, bool terminate) {
         for (uint8_t i = 0; i < prefix_count; i++) {
             // The length can be determined from the high bits of the first byte of each prefix.
             // For example, 3 bits means that the char has 3 bytes, so the prefix must have 2 bytes.
-            const uint8_t first_prefix_byte = (uint8_t)data[read_idx];
+            const uint8_t first_prefix_byte = (uint8_t)data[read_idx] & 0b11110000;
             if (first_prefix_byte < 0b10000000) {
                 utfc__prefix_map_deinit(&map);
                 result.error = UTFC_ERROR_INVALID_BYTE;
