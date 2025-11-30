@@ -185,30 +185,30 @@ typedef struct {
 /* ==================== #!PRIVATE!# ==================== */
 
 /// A helper function to count the `0` bits from the LSB to the MSB until the first `1` bit was found.
-static inline uint8_t utfc__zero_bits_count(size_t mask) {
+static inline uint8_t utfc__zero_bits_count(size_t mask, bool start_msb) {
     if (mask == 0) return 0;
     size_t result;
     #if defined(_MSC_VER)
         #if defined(UTFC__BMI_INTRINSICS)
             #if defined(UTFC_64BIT)
-                result = _tzcnt_u64(mask);
+                result = start_msb ? _lzcnt_u64(mask) : _tzcnt_u64(mask);
             #else
-                result = _tzcnt_u32(mask);
+                result = start_msb ? _lzcnt_u32(mask) : _tzcnt_u32(mask);
             #endif
         #else
             unsigned long idx;
             #if defined(UTFC_64BIT)
-                unsigned char _ = _BitScanForward64(&idx, mask);
+                unsigned char _ = start_msb ? _BitScanReverse64(&idx, mask) : _BitScanForward64(&idx, mask);
             #else
-                unsigned char _ = _BitScanForward(&idx, mask);
+                unsigned char _ = start_msb ? _BitScanReverse(&idx, mask) : _BitScanForward(&idx, mask);
             #endif
             result = idx;
         #endif
     #else
         #if defined(UTFC_64BIT)
-            result = __builtin_ctzll(mask);
+            result = start_msb ? __builtin_clzll(mask) : __builtin_ctzll(mask);
         #else
-            result = __builtin_ctz(mask);
+            result = start_msb ? __builtin_clz(mask) : __builtin_ctz(mask);
         #endif
     #endif
     return (uint8_t)result;
@@ -287,7 +287,7 @@ static bool utfc__next_non_ascii(const char *value, size_t len, size_t idx, size
         const __m512i vec = _mm512_loadu_si512((const __m512i *)&value[idx]);
         const uint64_t mask = _mm512_movepi8_mask(vec);
         if (mask != 0) {
-            *out = (size_t)utfc__zero_bits_count((size_t)mask);
+            *out = (size_t)utfc__zero_bits_count((size_t)mask, false);
             *out += idx;
             return true;
         }
@@ -301,7 +301,7 @@ static bool utfc__next_non_ascii(const char *value, size_t len, size_t idx, size
         const __m256i vec = _mm256_loadu_si256((const __m256i *)&value[idx]);
         const uint32_t mask = _mm256_movemask_epi8(vec);
         if (mask != 0) {
-            *out = (size_t)utfc__zero_bits_count((size_t)mask);
+            *out = (size_t)utfc__zero_bits_count((size_t)mask, false);
             *out += idx;
             return true;
         }
@@ -332,7 +332,7 @@ static bool utfc__next_non_ascii(const char *value, size_t len, size_t idx, size
         const uint16_t mask = ((uint16_t)vgetq_lane_u8(output, 8) << 8) | (uint16_t)vgetq_lane_u8(output, 0);
     #endif
         if (mask != 0) {
-            *out = (size_t)utfc__zero_bits_count((size_t)mask);
+            *out = (size_t)utfc__zero_bits_count((size_t)mask, false);
             *out += idx;
             return true;
         }
@@ -793,9 +793,10 @@ utfc_result utfc_decompress(const char *data, size_t len, bool terminate) {
                 result.error = UTFC_ERROR_INVALID_BYTE;
                 break;
             }
-            const uint8_t max_bits = 8;
-            const uint8_t bit_count = (max_bits - utfc__zero_bits_count((size_t)first_prefix_byte)) % max_bits;
-            const uint8_t prefix_len = bit_count - 1;
+            const uint8_t shift_distance = ((sizeof(size_t) * 8) - 8);
+            const size_t mask = ((size_t)(~first_prefix_byte) << shift_distance);
+            const uint8_t bit_count = utfc__zero_bits_count(mask, true);
+            const uint8_t prefix_len = (bit_count - 1);
 
             // A prefix with a length of 4 or more doesn't exist.
             if (prefix_len >= UTFC__MAX_CHAR_LEN) {
