@@ -511,7 +511,7 @@ static void utfc__pick_prefix_values(const utfc__prefix_map *prefix_map, uint32_
         max_values = UTFC__PREFIX_REDUCER_STACK_LIMIT;
     }
 
-    size_t value_count[UTFC__PREFIX_REDUCER_STACK_LIMIT] = { 1 };
+    size_t value_count[UTFC__PREFIX_REDUCER_STACK_LIMIT] = { 0 };
 
     // Pick new prefixes and count.
     for (size_t i = 0; i < prefix_map->len && *out_len < max_values; i++) {
@@ -527,6 +527,7 @@ static void utfc__pick_prefix_values(const utfc__prefix_map *prefix_map, uint32_
         }
 
         if (!found) {
+            value_count[*out_len] = 1;
             out[*out_len] = value;
             *out_len += 1;
         }
