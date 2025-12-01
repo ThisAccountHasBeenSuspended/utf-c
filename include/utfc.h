@@ -506,6 +506,9 @@ static utfc__header utfc__read_header(const char *data, size_t len) {
 }
 
 static void utfc__pick_prefix_values(const utfc__prefix_map *prefix_map, uint32_t *out, uint8_t *out_len) {
+    // NOTE: The minimum `value_count` for an element should be `3`.
+    // (A value below 3 is too inefficient)
+
     uint8_t max_values = prefix_map->len;
     if (max_values > UTFC__PREFIX_REDUCER_STACK_LIMIT) {
         max_values = UTFC__PREFIX_REDUCER_STACK_LIMIT;
@@ -535,16 +538,33 @@ static void utfc__pick_prefix_values(const utfc__prefix_map *prefix_map, uint32_
 
     // Sort in descending order.
     for (uint8_t i = 0; (i + 1) < *out_len; ++i) {
+        const size_t vci = value_count[i];
+        const uint8_t li = (out[i] >> 24);
+        size_t si = SIZE_MAX;
+        if ((size_t)li < (SIZE_MAX / vci)) {
+            si = (size_t)(li * vci);
+        }
+
+        // Find a better element than `i` in the remaining array.
         for (uint8_t j = (i + 1); j < *out_len; ++j) {
-            if (value_count[j] > value_count[i]) {
-                size_t tmp_value = value_count[i];
+            const size_t vcj = value_count[j];
+            if (vcj < 3) continue;
+
+            const uint8_t lj = (out[j] >> 24);
+            size_t sj = SIZE_MAX;
+            if ((size_t)lj < (SIZE_MAX / vcj)) {
+                sj = (size_t)(lj * vcj);
+            }
+
+            // Either a higher score or the same with a longer prefix.
+            if (sj > si || (sj == si && lj > li)) {
                 // Swap counts
-                value_count[i] = value_count[j];
-                value_count[j] = tmp_value;
+                value_count[i] = vcj;
+                value_count[j] = vci;
                 // Swap values
-                tmp_value = (size_t)out[i];
+                uint32_t tmp_value = out[i];
                 out[i] = out[j];
-                out[j] = (uint32_t)tmp_value;
+                out[j] = tmp_value;
             }
         }
     }
@@ -555,7 +575,6 @@ static void utfc__pick_prefix_values(const utfc__prefix_map *prefix_map, uint32_
     }
 
     // After sorting, we only want prefixes with a `value_count` of at least 3.
-    // (A value below 3 is too inefficient)
     for (uint8_t i = 0; i < *out_len; i++) {
         if (value_count[i] < 3) {
             *out_len = i;
