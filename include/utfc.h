@@ -558,7 +558,7 @@ static void utfc__pick_prefix_values(const utfc__prefix_map *prefix_map, uint32_
     // (A value below 3 is too inefficient)
     for (uint8_t i = 0; i < *out_len; i++) {
         if (value_count[i] < 3) {
-            *out_len = (i + 1);
+            *out_len = i;
             break;
         }
     }
