@@ -163,7 +163,6 @@ enum {
 
 typedef struct {
     uint32_t payload_len;
-    uint8_t error;
     uint8_t minor, flags;
     uint8_t len;
 } utfc__header;
@@ -440,68 +439,40 @@ static bool utfc__write_header(utfc_result *result, size_t len) {
     flags |= extra_length_bytes; // 000000xx
     result->value[UTFC__HEADER_IDX_FLAGS] = flags;
 
-    // Write length of decompressed payload.
-    result->value[UTFC__HEADER_IDX_LENGTH] = (char)len;
-    if (extra_length_bytes >= UTFC__EXTRA_LENGTH_BYTES_1)
-        result->value[result->len++] = (char)(len >> 8);
-    if (extra_length_bytes >= UTFC__EXTRA_LENGTH_BYTES_2)
-        result->value[result->len++] = (char)(len >> 16);
-    if (extra_length_bytes >= UTFC__EXTRA_LENGTH_BYTES_3)
-        result->value[result->len++] = (char)(len >> 24);
-    
+    // Copy the payload length into the next `1 + extra_length_bytes` bytes.
+    memcpy(&result->value[UTFC__HEADER_IDX_LENGTH], &len, (1 + extra_length_bytes));
+    result->len += extra_length_bytes;
+
     return true;
 }
 
-static utfc__header utfc__read_header(const char *data, size_t len) {
-    utfc__header header = { 0 };
-    if (len < UTFC__MIN_HEADER_LEN) {
-        header.error = UTFC_ERROR_INVALID_HEADER;
-        return header;
-    }
+static bool utfc__read_header(utfc__header *header, const char *data, size_t len) {
+    if (len < UTFC__MIN_HEADER_LEN) return false;
 
     // Check magic.
-    if (memcmp(data, UTFC__MAGIC_BYTES, UTFC__MAGIC_LEN) != 0) {
-        header.error = UTFC_ERROR_INVALID_HEADER;
-        return header;
-    }
+    if (memcmp(data, UTFC__MAGIC_BYTES, UTFC__MAGIC_LEN) != 0) return false;
 
     // Check major.
     const uint8_t major = data[UTFC__HEADER_IDX_MAJOR];
-    if (major != UTFC__MAJOR) {
-        header.error = UTFC_ERROR_INVALID_HEADER;
-        return header;
-    }
+    if (major != UTFC__MAJOR) return false;
 
     // Check minor.
-    header.minor = data[UTFC__HEADER_IDX_MINOR];
-    if (header.minor > UTFC__MINOR) {
-        header.error = UTFC_ERROR_INVALID_HEADER;
-        return header;
-    }
+    header->minor = data[UTFC__HEADER_IDX_MINOR];
+    if (header->minor > UTFC__MINOR) return false;
 
     // Check flags.
-    header.flags = data[UTFC__HEADER_IDX_FLAGS];
-    const uint8_t extra_length_bytes = (header.flags & UTFC__FLAG_EXTRA_LENGTH_BYTES_3);
-    if (len < (size_t)(UTFC__MIN_HEADER_LEN + extra_length_bytes)) {
-        header.error = UTFC_ERROR_INVALID_HEADER;
-        return header;
-    }
+    header->flags = data[UTFC__HEADER_IDX_FLAGS];
+    const uint8_t extra_length_bytes = (header->flags & UTFC__FLAG_EXTRA_LENGTH_BYTES_3);
+    if (len < (size_t)(UTFC__MIN_HEADER_LEN + extra_length_bytes)) return false;
 
-    // Determine the payload length.
-    header.payload_len = (uint32_t)data[UTFC__HEADER_IDX_LENGTH] & 0xFF;
-    if (extra_length_bytes >= UTFC__EXTRA_LENGTH_BYTES_1)
-        header.payload_len |= ((uint32_t)data[UTFC__HEADER_IDX_LENGTH + 1] & 0xFF) << 8;
-    if (extra_length_bytes >= UTFC__EXTRA_LENGTH_BYTES_2)
-        header.payload_len |= ((uint32_t)data[UTFC__HEADER_IDX_LENGTH + 2] & 0xFF) << 16;
-    if (extra_length_bytes >= UTFC__EXTRA_LENGTH_BYTES_3)
-        header.payload_len |= ((uint32_t)data[UTFC__HEADER_IDX_LENGTH + 3] & 0xFF) << 24;
+    // Copy the payload length bytes into `payload_length`.
+    memcpy(&header->payload_len, &data[UTFC__HEADER_IDX_LENGTH], (1 + extra_length_bytes));
 
-    // The total length of the header.
+    // Write the total length of the header.
     // (We start the decompression at this index)
-    uint8_t header_length = (UTFC__MIN_HEADER_LEN + extra_length_bytes);
-    header.len = header_length;
+    header->len = (UTFC__MIN_HEADER_LEN + extra_length_bytes);
 
-    return header;
+    return true;
 }
 
 static void utfc__pick_prefix_values(const utfc__prefix_map *prefix_map, uint32_t *out, uint8_t *out_len) {
@@ -786,9 +757,9 @@ utfc_result utfc_decompress(const char *data, size_t len, bool terminate) {
         return result;
     }
 
-    utfc__header header = utfc__read_header(data, len);
-    if (header.error != UTFC_ERROR_NONE) {
-        result.error = header.error;
+    utfc__header header = { 0 };
+    if (!utfc__read_header(&header, data, len)) {
+        result.error = UTFC_ERROR_INVALID_HEADER;
         return result;
     }
 
