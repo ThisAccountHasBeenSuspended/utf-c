@@ -5,6 +5,10 @@ ifeq ($(arm),1)
 	CC = arm-linux-gnueabihf-gcc
 	CFLAGS += -static -mfpu=neon -mcpu=cortex-a9
 	QEMU = qemu-arm -cpu cortex-a9
+else ifeq ($(riscv),1)
+	CC = riscv64-linux-gnu-gcc
+	CFLAGS += -static -march=rv64iv1p0
+	QEMU = qemu-riscv64
 else
 	CC = gcc
 	CFLAGS += -mavx2 -mavx512bw

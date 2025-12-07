@@ -57,6 +57,8 @@
     #endif
 #elif defined(__aarch64__) || defined(_M_ARM64) || defined(__arm__) || defined(_M_ARM)
     #define UTFC__ARM 1
+#elif defined(__riscv) || defined(__riscv__)
+    #define UTFC__RISCV 1
 #endif
 
 #if !defined(UTFC_64BIT)
@@ -79,6 +81,8 @@
     #include <immintrin.h>
 #elif defined(UTFC__ARM)
     #include <arm_neon.h>
+#elif defined(__riscv_vector)
+    #include <riscv_vector.h>
 #endif
 
 #define UTFC__MAGIC_LEN 3
@@ -312,32 +316,45 @@ static bool utfc__next_non_ascii(const char *value, size_t len, size_t idx, size
     }
 #endif
 
-#if defined(UTFC_SIMD_128) && ((defined(UTFC__X86) && defined(__SSE2__)) || defined(UTFC__ARM))
+#if defined(UTFC_SIMD_128) && (defined(__SSE2__) || defined(UTFC__ARM) || defined(__riscv_vector))
     while ((idx + 16) <= len) {
-    #if defined(UTFC__X86)
-        const __m128i vec = _mm_loadu_si128((const __m128i *)&value[idx]);
-        const uint16_t mask = _mm_movemask_epi8(vec);
-    #else
-        const uint8x16_t vec = vld1q_u8((const uint8_t *)&value[idx]);
-        // Right-shift each 8-bit element by 7,
-        // effectively extracting the MSB into the LSB.
-        const uint8x16_t msbs = vshrq_n_u8(vec, 7);
-        // Reinterpret 16x8-bit elements as 2x64-bit elements.
-        uint64x2_t bits = vreinterpretq_u64_u8(msbs);
-        // The bits B are shifted to the right by C and accumulated with A.
-        bits = vsraq_n_u64(bits, bits, 7);
-        bits = vsraq_n_u64(bits, bits, 14);
-        bits = vsraq_n_u64(bits, bits, 28);
-        // Reinterpret 2x64-bit elements as 16x8-bit elements.
-        const uint8x16_t output = vreinterpretq_u8_u64(bits);
-        // Get all MSB of the 16 bytes from index 0(low) and 8(high).
-        const uint16_t mask = ((uint16_t)vgetq_lane_u8(output, 8) << 8) | (uint16_t)vgetq_lane_u8(output, 0);
-    #endif
-        if (mask != 0) {
-            *out = (size_t)utfc__zero_bits_count((size_t)mask);
-            *out += idx;
-            return true;
-        }
+        #if defined(UTFC__RISCV)
+            const vuint8m1_t vec = __riscv_vle8_v_u8m1((const uint8_t *)&value[idx], 16);
+            // Returns a mask in which the bit was set to 1 at each position where the value was greater than 0x7F(127).
+            const vbool8_t mask = __riscv_vmsgtu_vx_u8m1_b8(vec, 0x7F, 16);
+            // Starts at the index-0 and returns the index of the first 1-bit.
+            const int f_idx = __riscv_vfirst_m_b8(mask, 16);
+            if (f_idx >= 0) {
+                *out = idx + (size_t)f_idx;
+                return true;
+            }
+        #else
+            #if defined(UTFC__X86)
+                const __m128i vec = _mm_loadu_si128((const __m128i *)&value[idx]);
+                const uint16_t mask = _mm_movemask_epi8(vec);
+            #elif defined(UTFC__ARM)
+                const uint8x16_t vec = vld1q_u8((const uint8_t *)&value[idx]);
+                // Right-shift each byte by 7 to extract MSB into LSB.
+                const uint8x16_t msbs = vshrq_n_u8(vec, 7);
+                // Reinterpret as 64-bit elements (2 lanes).
+                uint64x2_t bits = vreinterpretq_u64_u8(msbs);
+                // Accumulate bits with shifting.
+                bits = vsraq_n_u64(bits, bits, 7);
+                bits = vsraq_n_u64(bits, bits, 14);
+                bits = vsraq_n_u64(bits, bits, 28);
+                // Reinterpret back to 8-bit elements.
+                const uint8x16_t output = vreinterpretq_u8_u64(bits);
+                // Extract the two bytes at positions 0(low) and 8(high).
+                const uint8_t low = vgetq_lane_u8(output, 0);
+                const uint8_t high = vgetq_lane_u8(output, 8);
+                // Combine into 16-bit mask.
+                const uint16_t mask = ((uint16_t)high << 8) | (uint16_t)low;
+            #endif
+            if (mask != 0) {
+                *out = idx + (size_t)utfc__zero_bits_count((size_t)mask);
+                return true;
+            }
+        #endif
 
         idx += 16;
     }
