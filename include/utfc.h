@@ -28,12 +28,21 @@
  * - AVX2      = UTFC_SIMD_256
  * - SSE2,NEON = UTFC_SIMD_128
  * 
- * ╭─────────╴HEADER╶─────────╮
- * ├──────────┬───┬───┬───┬───┼────────────────┐
- * │ 55 38 43 │ ? │ ? │ 0 │ 8 │ D7 A9 9C 95 9D │
- * ├──────────┼───┴───┼───┴───┼[5 bytes]───────┘
- * └Magic     └Major  ├Flags  ├"שלום" (8 bytes)
- *               Minor┘ Length┘
+ * The following example shows the result of "😂😊😑😔😭":
+ * ┌────────────────────────────────────────────────────────────────────────┐
+ * │  bytes: [F0 9F 98 82 F0 9F 98 8A F0 9F 98 91 F0 9F 98 94 F0 9F 98 AD]  │
+ * ├────────────────────────────────────────────────────────────────────────┤
+ * │                             ┌Prefix reducer                            │
+ * │                             │┌──[24 bits]┬Second bit                   │
+ * │                      ┌[00000XXX][32 bits]┼Both bits together           │
+ * │                      │       │├─[16 bits]┴First bit                    │
+ * │                      │       └┴Additional bytes & total bits of length │
+ * │ ┌──────────┬───┬───┬─┴─┬────┬─────────────────────────┐                │
+ * │ │ 55 38 43 │ ? │ ? │ 0 │ 20 │ F0 9F 98 82 8A 91 94 AD │                │
+ * │ ├──────────┼───┴───┼───┴────┼[8 bytes]────────────────┘                │
+ * │ └Magic     └Major  ├Flags   ├Payload                                   │
+ * │               Minor┘  Length┘                                          │
+ * └────────────────────────────────────────────────────────────────────────┘
  * 
  * Written by Nick Ilhan Atamgüc <nickatamguec@outlook.com>
  */
@@ -145,20 +154,15 @@ enum {
 };
 
 enum {
-    UTFC__FLAG_EXTRA_LENGTH_BYTES_1 = 0b00000001, // 1
-    UTFC__FLAG_EXTRA_LENGTH_BYTES_2 = 0b00000010, // 2
-    UTFC__FLAG_PREFIX_REDUCER       = 0b00000100, // 4
-    UTFC__FLAG_RESERVED4            = 0b00001000, // 8
-    UTFC__FLAG_RESERVED5            = 0b00010000, // 16
-    UTFC__FLAG_RESERVED6            = 0b00100000, // 32
-    UTFC__FLAG_RESERVED7            = 0b01000000, // 64
-    UTFC__FLAG_RESERVED8            = 0b10000000, // 128
-    
-    /**
-     * Special flags.
-     */
-
-    UTFC__FLAG_EXTRA_LENGTH_BYTES_3 = 0b00000011, // 3
+    UTFC__FLAG_EXTRA_LENGTH_BYTES_1 = 0x01, // 0b00000001
+    UTFC__FLAG_EXTRA_LENGTH_BYTES_2 = 0x02, // 0b00000010
+    UTFC__FLAG_EXTRA_LENGTH_BYTES_3 = 0x03, // 0b00000011 (Special)
+    UTFC__FLAG_PREFIX_REDUCER       = 0x04, // 0b00000100
+    UTFC__FLAG_RESERVED4            = 0x08, // 0b00001000
+    UTFC__FLAG_RESERVED5            = 0x10, // 0b00010000
+    UTFC__FLAG_RESERVED6            = 0x20, // 0b00100000
+    UTFC__FLAG_RESERVED7            = 0x40, // 0b01000000
+    UTFC__FLAG_RESERVED8            = 0x80, // 0b10000000
 };
 
 typedef struct {
@@ -184,30 +188,30 @@ typedef struct {
 /* ==================== #!PRIVATE!# ==================== */
 
 /// A helper function to count the `0` bits from the LSB to the MSB until the first `1` bit was found.
-static inline uint8_t utfc__zero_bits_count(size_t mask, bool start_msb) {
+static inline uint8_t utfc__zero_bits_count(size_t mask) {
     if (mask == 0) return 0;
     size_t result;
     #if defined(_MSC_VER)
         #if defined(UTFC__BMI_INTRINSICS)
             #if defined(UTFC_64BIT)
-                result = (size_t)(start_msb ? _lzcnt_u64(mask) : _tzcnt_u64(mask));
+                result = (size_t)(_tzcnt_u64(mask));
             #else
-                result = (size_t)(start_msb ? _lzcnt_u32(mask) : _tzcnt_u32(mask));
+                result = (size_t)(_tzcnt_u32(mask));
             #endif
         #else
             unsigned long idx;
             #if defined(UTFC_64BIT)
-                unsigned char _ = (start_msb ? _BitScanReverse64(&idx, mask) : _BitScanForward64(&idx, mask));
+                unsigned char _ = _BitScanForward64(&idx, mask);
             #else
-                unsigned char _ = (start_msb ? _BitScanReverse(&idx, mask) : _BitScanForward(&idx, mask));
+                unsigned char _ = _BitScanForward(&idx, mask);
             #endif
             result = (size_t)idx;
         #endif
     #else
         #if defined(UTFC_64BIT)
-            result = (size_t)(start_msb ? __builtin_clzll(mask) : __builtin_ctzll(mask));
+            result = (size_t)(__builtin_ctzll(mask));
         #else
-            result = (size_t)(start_msb ? __builtin_clz(mask) : __builtin_ctz(mask));
+            result = (size_t)(__builtin_ctz(mask));
         #endif
     #endif
     return (uint8_t)result;
@@ -285,7 +289,7 @@ static bool utfc__next_non_ascii(const char *value, size_t len, size_t idx, size
         const __m512i vec = _mm512_loadu_si512((const __m512i *)&value[idx]);
         const uint64_t mask = _mm512_movepi8_mask(vec);
         if (mask != 0) {
-            *out = (size_t)utfc__zero_bits_count((size_t)mask, false);
+            *out = (size_t)utfc__zero_bits_count((size_t)mask);
             *out += idx;
             return true;
         }
@@ -299,7 +303,7 @@ static bool utfc__next_non_ascii(const char *value, size_t len, size_t idx, size
         const __m256i vec = _mm256_loadu_si256((const __m256i *)&value[idx]);
         const uint32_t mask = _mm256_movemask_epi8(vec);
         if (mask != 0) {
-            *out = (size_t)utfc__zero_bits_count((size_t)mask, false);
+            *out = (size_t)utfc__zero_bits_count((size_t)mask);
             *out += idx;
             return true;
         }
@@ -330,7 +334,7 @@ static bool utfc__next_non_ascii(const char *value, size_t len, size_t idx, size
         const uint16_t mask = ((uint16_t)vgetq_lane_u8(output, 8) << 8) | (uint16_t)vgetq_lane_u8(output, 0);
     #endif
         if (mask != 0) {
-            *out = (size_t)utfc__zero_bits_count((size_t)mask, false);
+            *out = (size_t)utfc__zero_bits_count((size_t)mask);
             *out += idx;
             return true;
         }
@@ -351,48 +355,43 @@ static bool utfc__next_non_ascii(const char *value, size_t len, size_t idx, size
 }
 
 /**
- * Returns the byte length for the next char of a UTF-8 string.
+ * Returns the byte length for the next character of a UTF-8 string.
  * 
  * Notices:
  * - The bytes from `idx` up to `idx` + `return` represent the prefix.
- * - `idx` + `return` is the index of the actual char.
- * - The `return` value 0 means that something went wrong.
+ * - `idx` + `return` is the index of the actual character.
+ * - The `return` value `0` means that the first byte is invalid (continuation byte).
+ * - The `return` value `-1` means that bytes are missing.
+ * - The `return` value `-2` means that the continuation bytes are invalid.
  */
-static uint8_t utfc__char_len(const char *value, size_t len, size_t idx) {
-    const char byte = value[idx];
-    uint8_t char_len = 1;
-
-    // Single-byte character
-    if ((byte & 0x80) == 0) return 1;
-    // Two-byte character
-    else if ((byte & 0xE0) == 0xC0) char_len = 2;
-    // Three-byte character
-    else if ((byte & 0xF0) == 0xE0) char_len = 3;
-    // Four-byte character
-    else if ((byte & 0xF8) == 0xF0) char_len = 4;
-    // Invalid start byte
-    else return 0;
+static int8_t utfc__char_len(const char *value, size_t len, size_t idx) {
+    const char first_byte = value[idx];
+    if ((first_byte & 0xC0) == 0x00) return 1; // Single-byte character
+    if ((first_byte & 0xC0) == 0x80) return 0; // Invalid start byte
+    const size_t mask = (size_t)(first_byte & 0xF0);
+    const uint8_t bit_count = (-utfc__zero_bits_count(mask)) & 0x07;
 
     // Do that many bytes even exist?
-    if ((len - idx) < char_len) return 0;
+    if ((len - idx) < bit_count) return -1;
 
-    for (uint8_t i = 1; i < char_len; ++i) {
-        if ((value[idx + i] & 0xC0) != 0x80) {
-            // No valid continuation byte
-            return 0;
-        }
+    // The `fallthrough` comment prevents a warning from the compiler,
+    // because `case 3` and `case 2` are also entered when `bit_count == 4`.
+    switch (bit_count) {
+        case 4: if ((value[idx + 3] & 0xC0) != 0x80) return -2; // fallthrough
+        case 3: if ((value[idx + 2] & 0xC0) != 0x80) return -2; // fallthrough
+        case 2: if ((value[idx + 1] & 0xC0) != 0x80) return -2; // fallthrough
     }
 
-    return char_len;
+    return bit_count;
 }
 
 /**
- * This function searches for the next non-ASCII char and writes everything up to that index.
+ * This function searches for the next non-ASCII character and writes everything up to that index.
  */
 static bool utfc__handle_ascii(utfc_result *result, const char *data, size_t len, size_t *idx) {
     size_t nna_out = 0;
     if (utfc__next_non_ascii(data, len, *idx, &nna_out)) {
-        // We found a non-ASCII char.
+        // We found a non-ASCII character.
         const size_t count = (nna_out - *idx);
         memcpy(&result->value[result->len], &data[*idx], count);
         result->len += count;
@@ -642,15 +641,15 @@ static bool utfc__compression(utfc_result *result, utfc__prefix_map *prefix_map,
 
     size_t read_idx = 0;
     while (read_idx < len) {
-        const uint8_t char_len = utfc__char_len(data, len, read_idx);
-        if (char_len == 0) {
-            // Something is wrong with this char, so we return
-            // the maximum of 4 checked bytes as the value to check them.
+        const int8_t char_len = utfc__char_len(data, len, read_idx);
+        if (char_len <= 0) {
+            // Something is wrong with this character.
+            // We will use the next (up to) 4 bytes to find the problem.
 
-            result->error = UTFC_ERROR_INVALID_BYTE;
+            result->error = (char_len == -1 ? UTFC_ERROR_MISSING_BYTES : UTFC_ERROR_INVALID_BYTE);
             const size_t remaining_bytes = (len - read_idx);
             result->len = ((remaining_bytes > UTFC__MAX_CHAR_LEN) ? UTFC__MAX_CHAR_LEN : remaining_bytes);
-            memcpy(result->value, &data[read_idx], remaining_bytes);
+            memcpy(result->value, &data[read_idx], result->len);
 
             return false;
         }
@@ -790,24 +789,16 @@ utfc_result utfc_decompress(const char *data, size_t len, bool terminate) {
         // Read all reduced prefixes and insert them into `map`.
         for (uint8_t i = 0; i < prefix_count; i++) {
             // The length can be determined from the high bits of the first byte of each prefix.
-            // For example, 3 bits means that the char has 3 bytes, so the prefix must have 2 bytes.
-            const uint8_t first_prefix_byte = (uint8_t)data[read_idx] & 0b11110000;
+            // For example, 3 bits means that the character has 3 bytes, so the prefix must have 2 bytes.
+            const char first_prefix_byte = data[read_idx];
             if ((first_prefix_byte & 0xC0) != 0xC0) {
                 utfc__prefix_map_deinit(&map);
                 result.error = UTFC_ERROR_INVALID_BYTE;
                 break;
             }
-            const uint8_t shift_distance = ((sizeof(size_t) * 8) - 8);
-            const size_t mask = ((size_t)(~first_prefix_byte) << shift_distance);
-            const uint8_t bit_count = utfc__zero_bits_count(mask, true);
+            const size_t mask = (size_t)(first_prefix_byte & 0xF0);
+            const uint8_t bit_count = (-utfc__zero_bits_count(mask)) & 0x07;
             const uint8_t prefix_len = (bit_count - 1);
-
-            // A prefix with a length of 4 or more doesn't exist.
-            if (prefix_len >= UTFC__MAX_CHAR_LEN) {
-                utfc__prefix_map_deinit(&map);
-                result.error = UTFC_ERROR_INVALID_BYTE;
-                break;
-            }
 
             if (len < (read_idx + prefix_len)) {
                 utfc__prefix_map_deinit(&map);
@@ -851,27 +842,37 @@ utfc_result utfc_decompress(const char *data, size_t len, bool terminate) {
             }
         }
 
+        // -2:  Missing bytes
+        // -1:  Invalid continuation bytes
         // 0:   cached_prefix + value
         // 1:   ASCII (no prefix)
         // 2-4: new prefix + value
-        const uint8_t char_len = utfc__char_len(data, len, read_idx);
+        const int8_t char_len = utfc__char_len(data, len, read_idx);
+        if (char_len < 0) { // Something is wrong
+            // Something is wrong with this character.
+            // We will use the next (up to) 4 bytes to find the problem.
 
-        if (char_len == 1) {
+            result.error = (char_len == -1 ? UTFC_ERROR_MISSING_BYTES : UTFC_ERROR_INVALID_BYTE);
+            const size_t remaining_bytes = (len - read_idx);
+            result.len = ((remaining_bytes > UTFC__MAX_CHAR_LEN) ? UTFC__MAX_CHAR_LEN : remaining_bytes);
+            memcpy(result.value, &data[read_idx], result.len);
+
+            break;
+        }
+
+        if (char_len == 1) { // ASCII
             // If the next byte is also ASCII, we use SIMD to find the next
             // non-ASCII byte and efficiently copy everything up to that index.
             if ((read_idx + 1) < len && (data[read_idx + 1] & 0x80) == 0) {
                 if (utfc__handle_ascii(&result, data, len, &read_idx)) break;
                 continue;
             }
-        }
-        
-        if (char_len > 1) {
-            cached_prefix_idx = read_idx;
-            cached_prefix_len = char_len - 1;
-            read_idx += cached_prefix_len;
-        }
-
-        if (char_len != 1) {
+        } else {
+            if (char_len > 1) { // New prefix
+                cached_prefix_idx = read_idx;
+                cached_prefix_len = char_len - 1;
+                read_idx += cached_prefix_len;
+            }
             memcpy(&result.value[result.len], &data[cached_prefix_idx], cached_prefix_len);
             result.len += cached_prefix_len;
         }
