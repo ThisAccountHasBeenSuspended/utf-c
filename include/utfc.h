@@ -176,17 +176,21 @@ typedef struct {
 } utfc__header;
 
 typedef struct utfc_result {
-    size_t len;
     char *value;
+    uint32_t len;
     uint8_t error;
 } utfc_result;
 
+/// Prefix map value.
 typedef struct {
-    size_t *indices;
-    size_t len, cap;
-    /// A value consists of the length (maximum 3 | 8 bits)
-    /// and the maximum 3 bytes of the prefix (8 bits each).
-    uint32_t *values;
+    uint32_t index;
+    // The length (1 byte) followed by the maximum 3 bytes of the prefix.
+    uint32_t value;
+} utfc__prefix_map_v;
+
+typedef struct {
+    utfc__prefix_map_v *values;
+    uint32_t len, cap;
 } utfc__prefix_map;
 
 /* ==================== #!PRIVATE!# ==================== */
@@ -224,17 +228,10 @@ static inline uint8_t utfc__zero_bits_count(size_t mask) {
 static bool utfc__prefix_map_init(utfc__prefix_map *map) {
     if (map->cap > 0) return true; // Already initialized
 
-    uint32_t *tmp_values = (uint32_t *)malloc(5 * sizeof(*tmp_values));
+    utfc__prefix_map_v *tmp_values = (utfc__prefix_map_v *)malloc(5 * sizeof(*tmp_values));
     if (tmp_values == NULL) return false;
 
-    size_t *tmp_indices = (size_t *)malloc(5 * sizeof(*tmp_indices));
-    if (tmp_indices == NULL) {
-        if (tmp_values != NULL) free(tmp_values);
-        return false;
-    }
-
     map->values = tmp_values;
-    map->indices = tmp_indices;
     map->cap = 5;
     return true;
 }
@@ -244,10 +241,6 @@ static void utfc__prefix_map_deinit(utfc__prefix_map *map) {
     if (map->values != NULL) {
         free(map->values);
         map->values = NULL;
-    }
-    if (map->indices != NULL) {
-        free(map->indices);
-        map->indices = NULL;
     }
     map->len = 0;
 }
@@ -264,28 +257,26 @@ static inline void utfc__prefix_unpack(uint32_t value, char *prefix_out, uint8_t
     memcpy(prefix_out, &value, 3);
 }
 
-static void utfc__prefix_map_add(utfc__prefix_map *map, const char *prefix, uint8_t len, size_t idx) {
+static void utfc__prefix_map_add(utfc__prefix_map *map, const char *prefix, uint8_t len, uint32_t idx) {
     if (map->cap == 0) return; // Not initialized
 
     if (map->len == map->cap) {
-        uint32_t *tmp_values = (uint32_t *)realloc(map->values, ((map->cap + 5) * sizeof(*tmp_values)));
+        if (map->cap > (UINT32_MAX - 5)) return;
+        const uint32_t new_cap = (map->cap + 5);
+        utfc__prefix_map_v *tmp_values = (utfc__prefix_map_v *)realloc(map->values, (new_cap * sizeof(*tmp_values)));
         if (tmp_values == NULL) return;
+
         map->values = tmp_values;
-
-        size_t *tmp_indices = (size_t *)realloc(map->indices, ((map->cap + 5) * sizeof(*tmp_indices)));
-        if (tmp_indices == NULL) return;
-        map->indices = tmp_indices;
-
-        map->cap += 5;
+        map->cap = new_cap;
     }
 
-    uint32_t value = utfc__prefix_pack(prefix, len);
-    map->values[map->len] = value;
-    map->indices[map->len] = idx;
-    map->len++;
+    map->values[map->len++] = (utfc__prefix_map_v){
+        .index = idx,
+        .value = utfc__prefix_pack(prefix, len)
+    };
 }
 
-static bool utfc__next_non_ascii(const char *value, size_t len, size_t idx, size_t *out) {
+static bool utfc__next_non_ascii(const char *value, uint32_t len, uint32_t idx, uint32_t *out) {
     if (idx >= len) return false;
 
 #if defined(UTFC_SIMD_512) && defined(UTFC__X86) && defined(UTFC_64BIT) && defined(__AVX512BW__)
@@ -293,7 +284,7 @@ static bool utfc__next_non_ascii(const char *value, size_t len, size_t idx, size
         const __m512i vec = _mm512_loadu_si512((const __m512i *)&value[idx]);
         const uint64_t mask = _mm512_movepi8_mask(vec);
         if (mask != 0) {
-            *out = (size_t)utfc__zero_bits_count((size_t)mask);
+            *out = (uint32_t)utfc__zero_bits_count((size_t)mask);
             *out += idx;
             return true;
         }
@@ -307,7 +298,7 @@ static bool utfc__next_non_ascii(const char *value, size_t len, size_t idx, size
         const __m256i vec = _mm256_loadu_si256((const __m256i *)&value[idx]);
         const uint32_t mask = _mm256_movemask_epi8(vec);
         if (mask != 0) {
-            *out = (size_t)utfc__zero_bits_count((size_t)mask);
+            *out = (uint32_t)utfc__zero_bits_count((size_t)mask);
             *out += idx;
             return true;
         }
@@ -325,7 +316,7 @@ static bool utfc__next_non_ascii(const char *value, size_t len, size_t idx, size
             // Starts at the index-0 and returns the index of the first 1-bit.
             const int f_idx = __riscv_vfirst_m_b8(mask, 16);
             if (f_idx >= 0) {
-                *out = idx + (size_t)f_idx;
+                *out = idx + (uint32_t)f_idx;
                 return true;
             }
         #else
@@ -351,7 +342,7 @@ static bool utfc__next_non_ascii(const char *value, size_t len, size_t idx, size
                 const uint16_t mask = ((uint16_t)high << 8) | (uint16_t)low;
             #endif
             if (mask != 0) {
-                *out = idx + (size_t)utfc__zero_bits_count((size_t)mask);
+                *out = idx + (uint32_t)utfc__zero_bits_count((size_t)mask);
                 return true;
             }
         #endif
@@ -381,12 +372,12 @@ static bool utfc__next_non_ascii(const char *value, size_t len, size_t idx, size
  * - The `return` value `-1` means that bytes are missing.
  * - The `return` value `-2` means that the continuation bytes are invalid.
  */
-static int8_t utfc__char_len(const char *value, size_t len, size_t idx) {
+static int8_t utfc__char_len(const char *value, uint32_t len, uint32_t idx) {
     const char first_byte = value[idx];
     if ((first_byte & 0xC0) == 0x00) return 1; // Single-byte character
     if ((first_byte & 0xC0) == 0x80) return 0; // Invalid start byte
     const size_t mask = (size_t)(first_byte & 0xF0);
-    const uint8_t bit_count = (-utfc__zero_bits_count(mask)) & 0x07;
+    const uint8_t bit_count = ((-utfc__zero_bits_count(mask)) & 0x07);
 
     // Do that many bytes even exist?
     if ((len - idx) < bit_count) return -1;
@@ -405,11 +396,11 @@ static int8_t utfc__char_len(const char *value, size_t len, size_t idx) {
 /**
  * This function searches for the next non-ASCII character and writes everything up to that index.
  */
-static bool utfc__handle_ascii(utfc_result *result, const char *data, size_t len, size_t *idx) {
-    size_t nna_out = 0;
+static bool utfc__handle_ascii(utfc_result *result, const char *data, uint32_t len, uint32_t *idx) {
+    uint32_t nna_out = 0;
     if (utfc__next_non_ascii(data, len, *idx, &nna_out)) {
         // We found a non-ASCII character.
-        const size_t count = (nna_out - *idx);
+        const uint32_t count = (nna_out - *idx);
         memcpy(&result->value[result->len], &data[*idx], count);
         result->len += count;
         *idx += count;
@@ -417,13 +408,13 @@ static bool utfc__handle_ascii(utfc_result *result, const char *data, size_t len
     }
 
     // Only ASCII chars left.
-    const size_t count = (len - *idx);
+    const uint32_t count = (len - *idx);
     memcpy(&result->value[result->len], &data[*idx], count);
     result->len += count;
     return true;
 }
 
-static bool utfc__write_header(utfc_result *result, size_t len) {
+static bool utfc__write_header(utfc_result *result, uint32_t len) {
     uint8_t extra_length_bytes = UTFC__EXTRA_LENGTH_BYTES_0; // Up to 8  bits
     if (len > (UINT32_MAX ^ 0xFF000000)) { // ----------------- Up to 32 bits
         extra_length_bytes = UTFC__EXTRA_LENGTH_BYTES_3;
@@ -433,7 +424,7 @@ static bool utfc__write_header(utfc_result *result, size_t len) {
         extra_length_bytes = UTFC__EXTRA_LENGTH_BYTES_1;
     }
 
-    const size_t value_len = UTFC__MIN_HEADER_LEN + extra_length_bytes + len;
+    const uint32_t value_len = UTFC__MIN_HEADER_LEN + extra_length_bytes + len;
     result->value = (char *)malloc(value_len * sizeof(*result->value));
     if (result->value == NULL) {
         result->error = UTFC_ERROR_OUT_OF_MEMORY;
@@ -462,7 +453,7 @@ static bool utfc__write_header(utfc_result *result, size_t len) {
     return true;
 }
 
-static bool utfc__read_header(utfc__header *header, const char *data, size_t len) {
+static bool utfc__read_header(utfc__header *header, const char *data, uint32_t len) {
     if (len < UTFC__MIN_HEADER_LEN) return false;
 
     // Check magic.
@@ -479,7 +470,7 @@ static bool utfc__read_header(utfc__header *header, const char *data, size_t len
     // Check flags.
     header->flags = data[UTFC__HEADER_IDX_FLAGS];
     const uint8_t extra_length_bytes = (header->flags & UTFC__FLAG_EXTRA_LENGTH_BYTES_3);
-    if (len < (size_t)(UTFC__MIN_HEADER_LEN + extra_length_bytes)) return false;
+    if (len < (uint32_t)(UTFC__MIN_HEADER_LEN + extra_length_bytes)) return false;
 
     // Copy the payload length bytes into `payload_length`.
     memcpy(&header->payload_len, &data[UTFC__HEADER_IDX_LENGTH], (1 + extra_length_bytes));
@@ -500,11 +491,11 @@ static void utfc__pick_prefix_values(const utfc__prefix_map *prefix_map, uint32_
         max_values = UTFC__PREFIX_REDUCER_STACK_LIMIT;
     }
 
-    size_t value_count[UTFC__PREFIX_REDUCER_STACK_LIMIT] = { 0 };
+    uint32_t value_count[UTFC__PREFIX_REDUCER_STACK_LIMIT] = { 0 };
 
     // Pick new prefixes and count.
-    for (size_t i = 0; i < prefix_map->len && *out_len < max_values; i++) {
-        const uint32_t value = prefix_map->values[i];
+    for (uint32_t i = 0; i < prefix_map->len && *out_len < max_values; i++) {
+        const uint32_t value = prefix_map->values[i].value;
 
         bool found = false;
         for (uint8_t j = 0; j < *out_len; ++j) {
@@ -525,23 +516,23 @@ static void utfc__pick_prefix_values(const utfc__prefix_map *prefix_map, uint32_
     // Sort in descending order.
     for (uint8_t i = 0; (i + 1) < *out_len; ++i) {
         // Best ...
-        uint8_t bi = i;              // index
-        size_t bvc = value_count[i]; // value_count
-        uint8_t bl = (out[i] >> 24); // length
-        size_t bs = SIZE_MAX;        // score
-        if ((size_t)bl < (SIZE_MAX / bvc)) {
-            bs = (size_t)(bl * bvc);
+        uint8_t bi = i;                // index
+        uint32_t bvc = value_count[i]; // value_count
+        uint8_t bl = (out[i] >> 24);   // length
+        uint32_t bs = UINT32_MAX;      // score
+        if ((uint32_t)bl < (UINT32_MAX / bvc)) {
+            bs = (uint32_t)(bl * bvc);
         }
 
         // Find the best element after index `i`.
         for (uint8_t j = (i + 1); j < *out_len; ++j) {
-            const size_t jvc = value_count[j];
+            const uint32_t jvc = value_count[j];
             if (jvc < 3) continue;
 
             const uint8_t jl = (out[j] >> 24);
-            size_t js = SIZE_MAX;
-            if ((size_t)jl < (SIZE_MAX / jvc)) {
-                js = (size_t)(jl * jvc);
+            uint32_t js = UINT32_MAX;
+            if ((uint32_t)jl < (UINT32_MAX / jvc)) {
+                js = (uint32_t)(jl * jvc);
             }
 
             // Either a higher score or the same with a longer prefix.
@@ -556,27 +547,27 @@ static void utfc__pick_prefix_values(const utfc__prefix_map *prefix_map, uint32_
         // We swap the position of the best element with the current one.
         if (bi != i) {
             // Swap count
-            size_t tmp_count = value_count[i];
+            uint32_t tmp = value_count[i];
             value_count[i] = bvc;
-            value_count[bi] = tmp_count;
+            value_count[bi] = tmp;
             // Swap value
-            uint32_t tmp_value = out[i];
+            tmp = out[i];
             out[i] = out[bi];
-            out[bi] = tmp_value;
+            out[bi] = tmp;
+        }
+    }
+
+    // After sorting, we only want prefixes with a `value_count` of at least 3.
+    for (uint8_t i = 0; i < *out_len && i < UTFC__MAX_PREFIX_MARKERS; i++) {
+        if (value_count[i] < 3) {
+            *out_len = i;
+            return;
         }
     }
 
     // We cannot exceed the limit.
     if (*out_len > UTFC__MAX_PREFIX_MARKERS) {
         *out_len = UTFC__MAX_PREFIX_MARKERS;
-    }
-
-    // After sorting, we only want prefixes with a `value_count` of at least 3.
-    for (uint8_t i = 0; i < *out_len; i++) {
-        if (value_count[i] < 3) {
-            *out_len = i;
-            break;
-        }
     }
 }
 
@@ -592,29 +583,28 @@ static bool utfc__prefix_reducer(utfc_result *result, const utfc__prefix_map *pr
     result->value[UTFC__HEADER_IDX_FLAGS] |= UTFC__FLAG_PREFIX_REDUCER;
 
     /* ====== REMOVE ====== */
-    size_t removed_bytes = 0;
-    for (size_t i = prefix_map->len; i-- > 0;) {
+    uint32_t removed_bytes = 0;
+    for (uint32_t i = prefix_map->len; i-- > 0;) {
         int8_t marker = -1;
         for (uint8_t j = 0; j < picked_values_len; j++) {
-            if (picked_values[j] == prefix_map->values[i]) {
+            if (picked_values[j] == prefix_map->values[i].value) {
                 marker = j;
                 break;
             }
         }
 
         if (marker != -1) {
-            const uint32_t val = prefix_map->values[i];
-            const size_t idx = prefix_map->indices[i];
+            const utfc__prefix_map_v pmv = prefix_map->values[i];
 
             // The length is located in the high 8 bits of the value.
-            const uint8_t val_len = (uint8_t)(val >> 24);
+            const uint8_t pmv_value_len = (uint8_t)(pmv.value >> 24);
 
             // Change first prefix byte to marker.
-            result->value[idx] = UTFC__PREFIX_MARKERS[marker];
+            result->value[pmv.index] = UTFC__PREFIX_MARKERS[marker];
 
-            const size_t move_len = (result->len - (idx + val_len));
-            memmove(&result->value[idx + 1], &result->value[idx + val_len], move_len);
-            removed_bytes += (val_len - 1);
+            const uint32_t move_len = (result->len - (pmv.index + pmv_value_len));
+            memmove(&result->value[pmv.index + 1], &result->value[pmv.index + pmv_value_len], move_len);
+            removed_bytes += (pmv_value_len - 1);
         }
     }
     result->len -= removed_bytes;
@@ -629,7 +619,7 @@ static bool utfc__prefix_reducer(utfc_result *result, const utfc__prefix_map *pr
 
     // A prefix consists of up to 3 bytes.
     // We add (3 * picked_values_len) to ensure sufficient capacity.
-    const size_t realloc_size = (result->len + (3 * picked_values_len));
+    const uint32_t realloc_size = (result->len + (3 * picked_values_len));
     const char *tmp_value = (char *)realloc(result->value, realloc_size * sizeof(*tmp_value));
     if (tmp_value == NULL) return false;
     result->value = (char *)tmp_value;
@@ -639,8 +629,8 @@ static bool utfc__prefix_reducer(utfc_result *result, const utfc__prefix_map *pr
         uint8_t prefix_len = 0;
         utfc__prefix_unpack(picked_values[i], prefix, &prefix_len);
 
-        const size_t from = (header_len + 1);
-        const size_t to = (from + prefix_len);
+        const uint32_t from = (header_len + 1);
+        const uint32_t to = (from + prefix_len);
 
         memmove(&result->value[to], &result->value[from], (result->len - from));
         for (uint8_t j = 0; j < prefix_len; j++) {
@@ -652,11 +642,11 @@ static bool utfc__prefix_reducer(utfc_result *result, const utfc__prefix_map *pr
     return true;
 }
 
-static bool utfc__compression(utfc_result *result, utfc__prefix_map *prefix_map, const char *data, size_t len) {
-    size_t cached_prefix_idx = 0;
+static bool utfc__compression(utfc_result *result, utfc__prefix_map *prefix_map, const char *data, uint32_t len) {
+    uint32_t cached_prefix_idx = 0;
     uint8_t cached_prefix_len = 0;
 
-    size_t read_idx = 0;
+    uint32_t read_idx = 0;
     while (read_idx < len) {
         const int8_t char_len = utfc__char_len(data, len, read_idx);
         if (char_len <= 0) {
@@ -664,7 +654,7 @@ static bool utfc__compression(utfc_result *result, utfc__prefix_map *prefix_map,
             // We will use the next (up to) 4 bytes to find the problem.
 
             result->error = (char_len == -1 ? UTFC_ERROR_MISSING_BYTES : UTFC_ERROR_INVALID_BYTE);
-            const size_t remaining_bytes = (len - read_idx);
+            const uint32_t remaining_bytes = (len - read_idx);
             result->len = ((remaining_bytes > UTFC__MAX_CHAR_LEN) ? UTFC__MAX_CHAR_LEN : remaining_bytes);
             memcpy(result->value, &data[read_idx], result->len);
 
@@ -734,8 +724,9 @@ utfc_result utfc_compress(const char *data, size_t len) {
         result.error = UTFC_ERROR_TOO_MANY_BYTES;
         return result;
     }
+    const uint32_t data_len = (uint32_t)len;
 
-    if (!utfc__write_header(&result, len)) {
+    if (!utfc__write_header(&result, data_len)) {
         return result;
     }
 
@@ -745,7 +736,7 @@ utfc_result utfc_compress(const char *data, size_t len) {
         return result;
     }
 
-    if (utfc__compression(&result, &prefix_map, data, len)) {
+    if (utfc__compression(&result, &prefix_map, data, data_len)) {
         bool failed = !utfc__prefix_reducer(&result, &prefix_map);
 
         if (failed) {
@@ -768,13 +759,15 @@ utfc_result utfc_compress(const char *data, size_t len) {
  */
 utfc_result utfc_decompress(const char *data, size_t len, bool terminate) {
     utfc_result result = { 0 };
+    
     if (len > UINT32_MAX) {
         result.error = UTFC_ERROR_TOO_MANY_BYTES;
         return result;
     }
+    const uint32_t data_len = (uint32_t)len;
 
     utfc__header header = { 0 };
-    if (!utfc__read_header(&header, data, len)) {
+    if (!utfc__read_header(&header, data, data_len)) {
         result.error = UTFC_ERROR_INVALID_HEADER;
         return result;
     }
@@ -786,14 +779,14 @@ utfc_result utfc_decompress(const char *data, size_t len, bool terminate) {
         return result;
     }
 
-    size_t read_idx = (size_t)header.len;
+    uint32_t read_idx = (uint32_t)header.len;
 
     // Prefix reducer.
     utfc__prefix_map map = { 0 };
     const bool use_prefix_reducer = ((data[UTFC__HEADER_IDX_FLAGS] & UTFC__FLAG_PREFIX_REDUCER) > 0);
     if (use_prefix_reducer) {
         const uint8_t prefix_count = data[read_idx++];
-        if (len < (read_idx + prefix_count)) {
+        if (data_len < (read_idx + prefix_count)) {
             result.error = UTFC_ERROR_MISSING_BYTES;
             return result;
         }
@@ -814,10 +807,10 @@ utfc_result utfc_decompress(const char *data, size_t len, bool terminate) {
                 break;
             }
             const size_t mask = (size_t)(first_prefix_byte & 0xF0);
-            const uint8_t bit_count = (-utfc__zero_bits_count(mask)) & 0x07;
+            const uint8_t bit_count = ((-utfc__zero_bits_count(mask)) & 0x07);
             const uint8_t prefix_len = (bit_count - 1);
 
-            if (len < (read_idx + prefix_len)) {
+            if (data_len < (read_idx + prefix_len)) {
                 utfc__prefix_map_deinit(&map);
                 result.error = UTFC_ERROR_MISSING_BYTES;
                 break;
@@ -828,9 +821,9 @@ utfc_result utfc_decompress(const char *data, size_t len, bool terminate) {
         }
     }
 
-    size_t cached_prefix_idx = 0;
+    uint32_t cached_prefix_idx = 0;
     uint8_t cached_prefix_len = 0;
-    while ((read_idx < len) && (result.len < header.payload_len)) {
+    while ((read_idx < data_len) && (result.len < header.payload_len)) {
         if (use_prefix_reducer) {
             const char byte = data[read_idx];
             // We should first check if the current byte is a valid marker.
@@ -846,10 +839,12 @@ utfc_result utfc_decompress(const char *data, size_t len, bool terminate) {
                 }
 
                 if (reduced != UINT8_MAX) {
+                    const utfc__prefix_map_v pmv = map.values[reduced];
+
                     char prefix[3] = { 0 };
                     uint8_t prefix_len = 0;
-                    utfc__prefix_unpack(map.values[reduced], prefix, &prefix_len);
-                    cached_prefix_idx = map.indices[reduced];
+                    utfc__prefix_unpack(pmv.value, prefix, &prefix_len);
+                    cached_prefix_idx = pmv.index;
                     cached_prefix_len = prefix_len;
 
                     memcpy(&result.value[result.len], prefix, prefix_len);
@@ -864,13 +859,13 @@ utfc_result utfc_decompress(const char *data, size_t len, bool terminate) {
         // 0:   cached_prefix + value
         // 1:   ASCII (no prefix)
         // 2-4: new prefix + value
-        const int8_t char_len = utfc__char_len(data, len, read_idx);
+        const int8_t char_len = utfc__char_len(data, data_len, read_idx);
         if (char_len < 0) { // Something is wrong
             // Something is wrong with this character.
             // We will use the next (up to) 4 bytes to find the problem.
 
             result.error = (char_len == -1 ? UTFC_ERROR_MISSING_BYTES : UTFC_ERROR_INVALID_BYTE);
-            const size_t remaining_bytes = (len - read_idx);
+            const uint32_t remaining_bytes = (data_len - read_idx);
             result.len = ((remaining_bytes > UTFC__MAX_CHAR_LEN) ? UTFC__MAX_CHAR_LEN : remaining_bytes);
             memcpy(result.value, &data[read_idx], result.len);
 
@@ -880,8 +875,8 @@ utfc_result utfc_decompress(const char *data, size_t len, bool terminate) {
         if (char_len == 1) { // ASCII
             // If the next byte is also ASCII, we use SIMD to find the next
             // non-ASCII byte and efficiently copy everything up to that index.
-            if ((read_idx + 1) < len && (data[read_idx + 1] & 0x80) == 0) {
-                if (utfc__handle_ascii(&result, data, len, &read_idx)) break;
+            if ((read_idx + 1) < data_len && (data[read_idx + 1] & 0x80) == 0) {
+                if (utfc__handle_ascii(&result, data, data_len, &read_idx)) break;
                 continue;
             }
         } else {
