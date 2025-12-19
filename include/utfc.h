@@ -50,12 +50,12 @@
 #if !defined(UTFC_H)
 #define UTFC_H 1
 
-#if defined(__x86_64__) || defined(_M_X64) || defined(_M_AMD64) || defined(__i386__) || defined(_M_IX86)
+#if defined(_M_IX86) || defined(_M_X64) || defined(_M_AMD64) || defined(__i386__) || defined(__x86_64__)
     #define UTFC__X86 1
     #if defined(__BMI__) || (defined(_MSC_VER) && defined(__AVX2__))
         #define UTFC__BMI_INTRINSICS 1
     #endif
-#elif defined(__aarch64__) || defined(_M_ARM64) || defined(__arm__) || defined(_M_ARM)
+#elif defined(_M_ARM) || defined(_M_ARM64) || defined(__arm__) || defined(__aarch64__)
     #define UTFC__ARM 1
 #elif defined(__riscv) || defined(__riscv__)
     #define UTFC__RISCV 1
@@ -79,7 +79,8 @@
 
 #if defined(UTFC__X86)
     #include <immintrin.h>
-#elif defined(UTFC__ARM)
+#elif defined(_M_ARM64) || defined(__arch64__) || defined(__ARM_NEON) || defined(__ARM_NEON__)
+    #define UTFC__NEON 1
     #include <arm_neon.h>
 #elif defined(__riscv_vector)
     #include <riscv_vector.h>
@@ -307,7 +308,7 @@ static bool utfc__next_non_ascii(const char *value, uint32_t len, uint32_t idx, 
     }
 #endif
 
-#if defined(UTFC_SIMD_128) && (defined(__SSE2__) || defined(UTFC__ARM) || defined(__riscv_vector))
+#if defined(UTFC_SIMD_128) && (defined(__SSE2__) || defined(UTFC__NEON) || defined(__riscv_vector))
     while ((idx + 16) <= len) {
         #if defined(UTFC__RISCV)
             const vuint8m1_t vec = __riscv_vle8_v_u8m1((const uint8_t *)&value[idx], 16);
