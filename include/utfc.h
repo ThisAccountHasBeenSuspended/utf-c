@@ -2,7 +2,7 @@
  * ┌────────────────────────────────────────────────────────────────────────────────┐
  * │ MIT License                                                                    │
  * │                                                                                │
- * │ Copyright (c) 2025 Nick Ilhan Atamgüc <nickatamguec@outlook.com>               │
+ * │ Copyright (c) 2025-2026 Nick Ilhan Atamgüc <nickatamguec@outlook.com>          │
  * │                                                                                │
  * │ Permission is hereby granted, free of charge, to any person obtaining a copy   │
  * │ of this software and associated documentation files (the "Software"), to deal  │
@@ -483,18 +483,17 @@ static bool utfc__read_header(utfc__header *header, const char *data, uint32_t l
     return true;
 }
 
-static void utfc__pick_prefix_values(const utfc__prefix_map *prefix_map, uint32_t *out, uint8_t *out_len) {
-    // NOTE: The minimum `value_count` for an element should be `3`.
-    // (A value below 3 is too inefficient)
-
+static void utfc__prefix_reducer_sort_desc(const utfc__prefix_map *prefix_map, uint32_t out[], uint8_t *out_len) {
     uint8_t max_values = prefix_map->len;
     if (max_values > UTFC__PREFIX_REDUCER_STACK_LIMIT) {
         max_values = UTFC__PREFIX_REDUCER_STACK_LIMIT;
     }
 
+    // NOTE: The minimum `value_count` for an element should be `3`.
+    // (A value below 3 is too inefficient)
     uint32_t value_count[UTFC__PREFIX_REDUCER_STACK_LIMIT] = { 0 };
 
-    // Pick new prefixes and count.
+    // Select new prefixes and count.
     for (uint32_t i = 0; i < prefix_map->len && *out_len < max_values; i++) {
         const uint32_t value = prefix_map->values[i].value;
 
@@ -514,7 +513,7 @@ static void utfc__pick_prefix_values(const utfc__prefix_map *prefix_map, uint32_
         }
     }
 
-    // Sort in descending order.
+    // Sort the strongest prefixes in descending order.
     for (uint8_t i = 0; (i + 1) < *out_len; ++i) {
         // Best ...
         uint8_t bi = i;                // index
@@ -575,40 +574,45 @@ static void utfc__pick_prefix_values(const utfc__prefix_map *prefix_map, uint32_
 static bool utfc__prefix_reducer(utfc_result *result, const utfc__prefix_map *prefix_map) {
     if (prefix_map->len < UTFC__PREFIX_REDUCER_THRESHOLD) return true;
 
-    uint32_t picked_values[UTFC__PREFIX_REDUCER_STACK_LIMIT] = { 0 };
-    uint8_t picked_values_len = 0;
-    utfc__pick_prefix_values(prefix_map, picked_values, &picked_values_len);
-    if (picked_values_len == 0) return false;
+    // We need a descending sorted list of the strongest prefixes found.
+    uint32_t sorted_prefixes[UTFC__PREFIX_REDUCER_STACK_LIMIT] = { 0 };
+    uint8_t sorted_prefixes_len = 0;
+    utfc__prefix_reducer_sort_desc(prefix_map, sorted_prefixes, &sorted_prefixes_len);
+    if (sorted_prefixes_len == 0) return false;
 
     // Set header flag.
     result->value[UTFC__HEADER_IDX_FLAGS] |= UTFC__FLAG_PREFIX_REDUCER;
 
     /* ====== REMOVE ====== */
-    uint32_t removed_bytes = 0;
+    // We loop through the entire map and replace the selected prefixes with markers.
     for (uint32_t i = prefix_map->len; i-- > 0;) {
-        int8_t marker = -1;
-        for (uint8_t j = 0; j < picked_values_len; j++) {
-            if (picked_values[j] == prefix_map->values[i].value) {
-                marker = j;
+        const utfc__prefix_map_v pmv = prefix_map->values[i];
+
+        // If the current prefix is ​​present in `sorted_prefixes`,
+        // the marker is determined based on its position.
+        int8_t marker_idx = -1;
+        for (uint8_t j = 0; j < sorted_prefixes_len; j++) {
+            if (sorted_prefixes[j] == pmv.value) {
+                marker_idx = j;
                 break;
             }
         }
 
-        if (marker != -1) {
-            const utfc__prefix_map_v pmv = prefix_map->values[i];
-
+        // If `marker_idx` is not `-1`, the bytes of the current prefix
+        // are removed and replaced with a single byte (the marker).
+        if (marker_idx != -1) {
             // The length is located in the high 8 bits of the value.
             const uint8_t pmv_value_len = (uint8_t)(pmv.value >> 24);
 
             // Change first prefix byte to marker.
-            result->value[pmv.index] = UTFC__PREFIX_MARKERS[marker];
+            result->value[pmv.index] = UTFC__PREFIX_MARKERS[marker_idx];
 
-            const uint32_t move_len = (result->len - (pmv.index + pmv_value_len));
-            memmove(&result->value[pmv.index + 1], &result->value[pmv.index + pmv_value_len], move_len);
-            removed_bytes += (pmv_value_len - 1);
+            const uint32_t src_len = (pmv.index + pmv_value_len);
+            const uint32_t move_len = (result->len - src_len);
+            memmove(&result->value[pmv.index + 1], &result->value[src_len], move_len);
+            result->len -= (pmv_value_len - 1);
         }
     }
-    result->len -= removed_bytes;
 
     /* ====== ADD ====== */
     const uint8_t header_len = UTFC__MIN_HEADER_LEN + (result->value[UTFC__HEADER_IDX_FLAGS] & UTFC__FLAG_EXTRA_LENGTH_BYTES_3);
@@ -616,19 +620,14 @@ static bool utfc__prefix_reducer(utfc_result *result, const utfc__prefix_map *pr
     // Set the byte for the length of the reduced prefixes directly after the header.
     memmove(&result->value[header_len + 1], &result->value[header_len], (result->len - header_len));
     result->len += 1;
-    result->value[header_len] = picked_values_len;
+    result->value[header_len] = sorted_prefixes_len;
 
-    // A prefix consists of up to 3 bytes.
-    // We add (3 * picked_values_len) to ensure sufficient capacity.
-    const uint32_t realloc_size = (result->len + (3 * picked_values_len));
-    const char *tmp_value = (char *)realloc(result->value, realloc_size * sizeof(*tmp_value));
-    if (tmp_value == NULL) return false;
-    result->value = (char *)tmp_value;
-
-    for (uint8_t i = picked_values_len; i-- > 0;) {
+    // We move the payload (number of bytes of the prefix)
+    // to the right and write the prefix in front of it.
+    for (uint8_t i = sorted_prefixes_len; i-- > 0;) {
         char prefix[3] = { 0 };
         uint8_t prefix_len = 0;
-        utfc__prefix_unpack(picked_values[i], prefix, &prefix_len);
+        utfc__prefix_unpack(sorted_prefixes[i], prefix, &prefix_len);
 
         const uint32_t from = (header_len + 1);
         const uint32_t to = (from + prefix_len);
