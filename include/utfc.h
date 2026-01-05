@@ -640,62 +640,6 @@ static void utfc__prefix_reducer(utfc_result *result, const utfc__prefix_map *pr
     }
 }
 
-static bool utfc__compression(utfc_result *result, utfc__prefix_map *prefix_map, const char *data, uint32_t len) {
-    uint32_t cached_prefix_idx = 0;
-    uint8_t cached_prefix_len = 0;
-
-    uint32_t read_idx = 0;
-    while (read_idx < len) {
-        const int8_t char_len = utfc__char_len(data, len, read_idx);
-        if (char_len <= 0) {
-            // Something is wrong with this character.
-            // We will use the next (up to) 4 bytes to find the problem.
-
-            result->error = (char_len == -1 ? UTFC_ERROR_MISSING_BYTES : UTFC_ERROR_INVALID_BYTE);
-            const uint32_t remaining_bytes = (len - read_idx);
-            result->len = ((remaining_bytes > UTFC__MAX_CHAR_LEN) ? UTFC__MAX_CHAR_LEN : remaining_bytes);
-            memcpy(result->value, &data[read_idx], result->len);
-
-            return false;
-        }
-
-        const uint8_t prefix_len = (char_len - 1);
-        if (prefix_len > 0) {
-            bool prefix_changed = (prefix_len != cached_prefix_len);
-
-            // If the length is not different, we check if the bytes are identical.
-            if (!prefix_changed) {
-                if (memcmp(&data[cached_prefix_idx], &data[read_idx], prefix_len) != 0) {
-                    prefix_changed = true;
-                }
-            }
-
-            // When we have a new prefix, it is cached and written.
-            if (prefix_changed) {
-                cached_prefix_idx = read_idx;
-                cached_prefix_len = prefix_len;
-
-                utfc__prefix_map_add(prefix_map, &data[cached_prefix_idx], cached_prefix_len, result->len);
-
-                memcpy(&result->value[result->len], &data[read_idx], prefix_len);
-                result->len += prefix_len;
-            }
-
-            read_idx += prefix_len;
-        }
-        // If the next byte is also ASCII, we use SIMD to find the next
-        // non-ASCII byte and efficiently copy everything up to that index.
-        else if ((read_idx + 1) < len && (data[read_idx + 1] & 0x80) == 0) {
-            if (utfc__handle_ascii(result, data, len, &read_idx)) break;
-            continue;
-        }
-
-        result->value[result->len++] = data[read_idx++];
-    }
-
-    return true;
-}
-
 /* ==================== #!PUBLIC!# ==================== */
 
 /**
@@ -734,12 +678,61 @@ utfc_result utfc_compress(const char *data, size_t len) {
         return result;
     }
 
-    if (utfc__compression(&result, &prefix_map, data, data_len)) {
-        utfc__prefix_reducer(&result, &prefix_map);
+    uint32_t read_idx = 0;
+    uint32_t cached_prefix_idx = 0;
+    uint8_t cached_prefix_len = 0;
+    while (read_idx < len) {
+        const int8_t char_len = utfc__char_len(data, len, read_idx);
+        if (char_len <= 0) {
+            // Something is wrong with this character.
+            // We will use the next (up to) 4 bytes to find the problem.
 
-        char *resized_value = (char *)realloc(result.value, result.len * sizeof(*resized_value));
-        if (resized_value != NULL) result.value = resized_value;
+            result.error = (char_len == -1 ? UTFC_ERROR_MISSING_BYTES : UTFC_ERROR_INVALID_BYTE);
+            const uint32_t remaining_bytes = (len - read_idx);
+            result.len = ((remaining_bytes > UTFC__MAX_CHAR_LEN) ? UTFC__MAX_CHAR_LEN : remaining_bytes);
+            memcpy(result.value, &data[read_idx], result.len);
+
+            return result;
+        }
+
+        const uint8_t prefix_len = (char_len - 1);
+        if (prefix_len > 0) {
+            bool prefix_changed = (prefix_len != cached_prefix_len);
+
+            // If the length is not different, we check if the bytes are identical.
+            if (!prefix_changed) {
+                if (memcmp(&data[cached_prefix_idx], &data[read_idx], prefix_len) != 0) {
+                    prefix_changed = true;
+                }
+            }
+
+            // When we have a new prefix, it is cached and written.
+            if (prefix_changed) {
+                cached_prefix_idx = read_idx;
+                cached_prefix_len = prefix_len;
+
+                utfc__prefix_map_add(&prefix_map, &data[cached_prefix_idx], cached_prefix_len, result.len);
+
+                memcpy(&result.value[result.len], &data[read_idx], prefix_len);
+                result.len += prefix_len;
+            }
+
+            read_idx += prefix_len;
+        }
+        // If the next byte is also ASCII, we use SIMD to find the next
+        // non-ASCII byte and efficiently copy everything up to that index.
+        else if ((read_idx + 1) < len && (data[read_idx + 1] & 0x80) == 0) {
+            if (utfc__handle_ascii(&result, data, len, &read_idx)) break;
+            continue;
+        }
+
+        result.value[result.len++] = data[read_idx++];
     }
+
+    utfc__prefix_reducer(&result, &prefix_map);
+
+    char *resized_value = (char *)realloc(result.value, result.len * sizeof(*resized_value));
+    if (resized_value != NULL) result.value = resized_value;
 
     utfc__prefix_map_deinit(&prefix_map);
 
