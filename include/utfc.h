@@ -825,32 +825,16 @@ utfc_result utfc_decompress(const char *data, size_t len, bool terminate) {
     uint8_t cached_prefix_len = 0;
     while ((read_idx < data_len) && (result.len < header.payload_len)) {
         if (use_prefix_reducer) {
-            const char byte = data[read_idx];
-            // We should first check if the current byte is a valid marker.
-            if ((byte == UTFC__PREFIX_MARKERS[0]) || (byte == UTFC__PREFIX_MARKERS[1]) || (byte >= UTFC__PREFIX_MARKERS[2])) {
-                // We use a single variable for checking and the marker index.
-                // `UINT8_MAX` means "not found", all other values ​​are the index.
-                uint8_t reduced = UINT8_MAX;
-                for (uint8_t i = 0; i < UTFC__MAX_PREFIX_MARKERS; i++) {
-                    if (byte == UTFC__PREFIX_MARKERS[i]) {
-                        reduced = i;
-                        break;
-                    }
-                }
+            const uint8_t byte = (uint8_t)data[read_idx];
+            if (byte == 0xC0 || byte == 0xC1 || byte >= 0xF5) {
+                const uint8_t marker_idx = (byte - ((byte >= 0xF5) ? 0xF0 : 0xC0));
+                const utfc__prefix_map_v pmv = map.values[marker_idx];
 
-                if (reduced != UINT8_MAX) {
-                    const utfc__prefix_map_v pmv = map.values[reduced];
+                cached_prefix_idx = pmv.index;
+                cached_prefix_len = (uint8_t)(pmv.value >> 24); // Length extraction
 
-                    char prefix[3] = { 0 };
-                    uint8_t prefix_len = 0;
-                    utfc__prefix_unpack(pmv.value, prefix, &prefix_len);
-                    cached_prefix_idx = pmv.index;
-                    cached_prefix_len = prefix_len;
-
-                    memcpy(&result.value[result.len], prefix, prefix_len);
-                    read_idx += 1;
-                    continue;
-                }
+                read_idx += 1;
+                continue;
             }
         }
 
