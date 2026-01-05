@@ -571,14 +571,14 @@ static void utfc__prefix_reducer_sort_desc(const utfc__prefix_map *prefix_map, u
     }
 }
 
-static bool utfc__prefix_reducer(utfc_result *result, const utfc__prefix_map *prefix_map) {
-    if (prefix_map->len < UTFC__PREFIX_REDUCER_THRESHOLD) return true;
+static void utfc__prefix_reducer(utfc_result *result, const utfc__prefix_map *prefix_map) {
+    if (prefix_map->len < UTFC__PREFIX_REDUCER_THRESHOLD) return;
 
     // We need a descending sorted list of the strongest prefixes found.
     uint32_t sorted_prefixes[UTFC__PREFIX_REDUCER_STACK_LIMIT] = { 0 };
     uint8_t sorted_prefixes_len = 0;
     utfc__prefix_reducer_sort_desc(prefix_map, sorted_prefixes, &sorted_prefixes_len);
-    if (sorted_prefixes_len == 0) return false;
+    if (sorted_prefixes_len == 0) return;
 
     // Set header flag.
     result->value[UTFC__HEADER_IDX_FLAGS] |= UTFC__FLAG_PREFIX_REDUCER;
@@ -638,8 +638,6 @@ static bool utfc__prefix_reducer(utfc_result *result, const utfc__prefix_map *pr
         }
         result->len += prefix_len;
     }
-
-    return true;
 }
 
 static bool utfc__compression(utfc_result *result, utfc__prefix_map *prefix_map, const char *data, uint32_t len) {
@@ -737,14 +735,10 @@ utfc_result utfc_compress(const char *data, size_t len) {
     }
 
     if (utfc__compression(&result, &prefix_map, data, data_len)) {
-        bool failed = !utfc__prefix_reducer(&result, &prefix_map);
+        utfc__prefix_reducer(&result, &prefix_map);
 
-        if (failed) {
-            result.error = UTFC_ERROR_OUT_OF_MEMORY;
-        } else {
-            char *resized_value = (char *)realloc(result.value, result.len * sizeof(*resized_value));
-            if (resized_value != NULL) result.value = resized_value;
-        }
+        char *resized_value = (char *)realloc(result.value, result.len * sizeof(*resized_value));
+        if (resized_value != NULL) result.value = resized_value;
     }
 
     utfc__prefix_map_deinit(&prefix_map);
