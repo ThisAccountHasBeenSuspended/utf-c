@@ -1,28 +1,30 @@
 > [!IMPORTANT]
-> UTF-C is a hobby project for the simple compression of UTF-8 strings with non-ASCII characters. This project is not a standard!
+> UTF-C is a hobby project for the simple compression of UTF-8 strings with non-ASCII characters.
 
 > [!NOTE]
 > This project is a completely original work and does not follow any standards or templates. Contributions and improvements are welcome.
 
 > [!TIP]
-> This project supports SSE2, AVX2, AVX512 and NEON.
+> This project supports SSE2, AVX2, AVX512, NEON and RVV ([`RISCV-Vector-1.0`](https://lists.riscv.org/g/tech-vector-ext/attachment/691/0/riscv-v-spec-1.0.pdf)).
 >
 > To use SIMD, please define:
-> - "UTFC_SIMD_128" for SSE2/NEON
-> - "UTFC_SIMD_256" for AVX2
-> - "UTFC_SIMD_512" for AVX512
+> - "UTFC_SIMD_128" for SSE2/NEON/RVV
+> - "UTFC_SIMD_256" for AVX2/RVV
+> - "UTFC_SIMD_512" for AVX512/RVV
 
 Example:
 ```
+value: "😂😊😑😔😭"
+bytes: [F0 9F 98 82 F0 9F 98 8A F0 9F 98 91 F0 9F 98 94 F0 9F 98 AD]
                             ┌Prefix reducer
                             │┌──[24 bits]┬Second bit
-                     ┌[00000xxx][32 bits]┼Both bits together
+                     ┌[00000XXX][32 bits]┼Both bits together
                      │       │├─[16 bits]┴First bit
                      │       └┴Additional bytes & total bits of length
-┌──────────┬───┬───┬─┴─┬────┬───────────────────────────────────────────┐
-│ 55 38 43 │ ? │ ? │ 0 │ 24 │ D7 90 A0 99 20 90 95 94 91 20 90 95 AA 9A │
-├──────────┼───┴───┼───┴────┼[14 bytes]─────────────────────────────────┘
-└Magic     └Major  ├Flags   ├"אני אוהב אותך" (24 bytes)
+┌──────────┬───┬───┬─┴─┬────┬─────────────────────────┐
+│ 55 38 43 │ ? │ ? │ 0 │ 20 │ F0 9F 98 82 8A 91 94 AD │
+├──────────┼───┴───┼───┴────┼[8 bytes]────────────────┘
+└Magic     └Major  ├Flags   ├"😂😊😑😔😭" (20 bytes)
               Minor┘  Length┘
 ```
 
