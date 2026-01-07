@@ -280,29 +280,57 @@ static void utfc__prefix_map_add(utfc__prefix_map *map, const char *prefix, uint
 static bool utfc__next_non_ascii(const char *value, uint32_t len, uint32_t idx, uint32_t *out) {
     if (idx >= len) return false;
 
-#if defined(UTFC_SIMD_512) && defined(UTFC__X86) && defined(UTFC_64BIT) && defined(__AVX512BW__)
+#if defined(UTFC_SIMD_512) && (defined(__AVX512BW__) || defined(__riscv_vector))
     while ((idx + 64) <= len) {
-        const __m512i vec = _mm512_loadu_si512((const __m512i *)&value[idx]);
-        const uint64_t mask = _mm512_movepi8_mask(vec);
-        if (mask != 0) {
-            *out = (uint32_t)utfc__zero_bits_count((size_t)mask);
-            *out += idx;
-            return true;
-        }
+        #if defined(UTFC__RISCV)
+            const vuint8m4_t vec = __riscv_vle8_v_u8m4((const uint8_t *)&value[idx], 64);
+            // We check all `64` bytes for a value greater than `0x7F`(127).
+            // The bits of the positions where the bytes match are set to `1`.
+            const vbool2_t mask = __riscv_vmsgtu_vx_u8m4_b2(vec, 0x7F, 64);
+            // Returns the position of the first 1-bit.
+            // (`-1` means that there is no match)
+            const long pos = __riscv_vfirst_m_b2(mask, 64);
+            if (pos >= 0) {
+                *out = idx + (uint32_t)pos;
+                return true;
+            }
+        #else
+            const __m512i vec = _mm512_loadu_si512((const __m512i *)&value[idx]);
+            const uint64_t mask = _mm512_movepi8_mask(vec);
+            if (mask != 0) {
+                *out = (uint32_t)utfc__zero_bits_count((size_t)mask);
+                *out += idx;
+                return true;
+            }
+        #endif
 
         idx += 64;
     }
 #endif
 
-#if defined(UTFC_SIMD_256) && defined(UTFC__X86) && defined(__AVX2__)
+#if defined(UTFC_SIMD_256) && (defined(__AVX2__) || defined(__riscv_vector))
     while ((idx + 32) <= len) {
-        const __m256i vec = _mm256_loadu_si256((const __m256i *)&value[idx]);
-        const uint32_t mask = _mm256_movemask_epi8(vec);
-        if (mask != 0) {
-            *out = (uint32_t)utfc__zero_bits_count((size_t)mask);
-            *out += idx;
-            return true;
-        }
+        #if defined(UTFC__RISCV)
+            const vuint8m2_t vec = __riscv_vle8_v_u8m2((const uint8_t *)&value[idx], 32);
+            // We check all `32` bytes for a value greater than `0x7F`(127).
+            // The bits of the positions where the bytes match are set to `1`.
+            const vbool4_t mask = __riscv_vmsgtu_vx_u8m2_b4(vec, 0x7F, 32);
+            // Returns the position of the first 1-bit.
+            // (`-1` means that there is no match)
+            const long pos = __riscv_vfirst_m_b4(mask, 32);
+            if (pos >= 0) {
+                *out = idx + (uint32_t)pos;
+                return true;
+            }
+        #else
+            const __m256i vec = _mm256_loadu_si256((const __m256i *)&value[idx]);
+            const uint32_t mask = _mm256_movemask_epi8(vec);
+            if (mask != 0) {
+                *out = (uint32_t)utfc__zero_bits_count((size_t)mask);
+                *out += idx;
+                return true;
+            }
+        #endif
 
         idx += 32;
     }
@@ -312,18 +340,20 @@ static bool utfc__next_non_ascii(const char *value, uint32_t len, uint32_t idx, 
     while ((idx + 16) <= len) {
         #if defined(UTFC__RISCV)
             const vuint8m1_t vec = __riscv_vle8_v_u8m1((const uint8_t *)&value[idx], 16);
-            // Returns a mask in which the bit was set to 1 at each position where the value was greater than 0x7F(127).
+            // We check all `16` bytes for a value greater than `0x7F`(127).
+            // The bits of the positions where the bytes match are set to `1`.
             const vbool8_t mask = __riscv_vmsgtu_vx_u8m1_b8(vec, 0x7F, 16);
-            // Starts at the index-0 and returns the index of the first 1-bit.
-            const int f_idx = __riscv_vfirst_m_b8(mask, 16);
-            if (f_idx >= 0) {
-                *out = idx + (uint32_t)f_idx;
+            // Returns the position of the first 1-bit.
+            // (`-1` means that there is no match)
+            const long pos = __riscv_vfirst_m_b8(mask, 16);
+            if (pos >= 0) {
+                *out = idx + (uint32_t)pos;
                 return true;
             }
         #else
             #if defined(UTFC__X86)
                 const __m128i vec = _mm_loadu_si128((const __m128i *)&value[idx]);
-                const uint16_t mask = _mm_movemask_epi8(vec);
+                const int mask = _mm_movemask_epi8(vec);
             #elif defined(UTFC__ARM)
                 const uint8x16_t vec = vld1q_u8((const uint8_t *)&value[idx]);
                 // Right-shift each byte by 7 to extract MSB into LSB.
@@ -337,8 +367,8 @@ static bool utfc__next_non_ascii(const char *value, uint32_t len, uint32_t idx, 
                 // Reinterpret back to 8-bit elements.
                 const uint8x16_t output = vreinterpretq_u8_u64(bits);
                 // Extract the two bytes at positions 0(low) and 8(high).
-                const uint8_t low = vgetq_lane_u8(output, 0);
-                const uint8_t high = vgetq_lane_u8(output, 8);
+                const unsigned char low = vgetq_lane_u8(output, 0);
+                const unsigned char high = vgetq_lane_u8(output, 8);
                 // Combine into 16-bit mask.
                 const uint16_t mask = ((uint16_t)high << 8) | (uint16_t)low;
             #endif
