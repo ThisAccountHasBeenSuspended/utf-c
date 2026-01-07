@@ -296,7 +296,7 @@ static bool utfc__next_non_ascii(const char *value, uint32_t len, uint32_t idx, 
             }
         #else
             const __m512i vec = _mm512_loadu_si512((const __m512i *)&value[idx]);
-            const uint64_t mask = _mm512_movepi8_mask(vec);
+            const unsigned long long mask = _mm512_movepi8_mask(vec);
             if (mask != 0) {
                 *out = (uint32_t)utfc__zero_bits_count((size_t)mask);
                 *out += idx;
@@ -324,7 +324,7 @@ static bool utfc__next_non_ascii(const char *value, uint32_t len, uint32_t idx, 
             }
         #else
             const __m256i vec = _mm256_loadu_si256((const __m256i *)&value[idx]);
-            const uint32_t mask = _mm256_movemask_epi8(vec);
+            const int mask = _mm256_movemask_epi8(vec);
             if (mask != 0) {
                 *out = (uint32_t)utfc__zero_bits_count((size_t)mask);
                 *out += idx;
@@ -370,7 +370,7 @@ static bool utfc__next_non_ascii(const char *value, uint32_t len, uint32_t idx, 
                 const unsigned char low = vgetq_lane_u8(output, 0);
                 const unsigned char high = vgetq_lane_u8(output, 8);
                 // Combine into 16-bit mask.
-                const uint16_t mask = ((uint16_t)high << 8) | (uint16_t)low;
+                const unsigned short mask = ((unsigned short)high << 8) | (unsigned short)low;
             #endif
             if (mask != 0) {
                 *out = idx + (uint32_t)utfc__zero_bits_count((size_t)mask);
