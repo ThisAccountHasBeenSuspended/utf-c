@@ -798,8 +798,8 @@ utfc_result utfc_decompress(const char *data, size_t len, bool terminate) {
 
     uint32_t read_idx = (uint32_t)header.len;
 
-    // Prefix reducer.
-    utfc__prefix_map map = { 0 };
+    /* ====== PREFIX REDUCER ====== */
+    uint32_t reduced_prefixes[UTFC__MAX_PREFIX_MARKERS] = { 0 };
     const bool use_prefix_reducer = ((data[UTFC__HEADER_IDX_FLAGS] & UTFC__FLAG_PREFIX_REDUCER) > 0);
     if (use_prefix_reducer) {
         const uint8_t prefix_count = data[read_idx++];
@@ -808,48 +808,38 @@ utfc_result utfc_decompress(const char *data, size_t len, bool terminate) {
             return result;
         }
 
-        if (!utfc__prefix_map_init(&map)) {
-            result.error = UTFC_ERROR_OUT_OF_MEMORY;
-            return result;
-        }
-
-        // Read all reduced prefixes and insert them into `map`.
         for (uint8_t i = 0; i < prefix_count; i++) {
-            // The length can be determined from the high bits of the first byte of each prefix.
-            // For example, 3 bits means that the character has 3 bytes, so the prefix must have 2 bytes.
             const char first_prefix_byte = data[read_idx];
+
+            // To be a valid "first"-byte of a prefix, the 2 highest bits must be set to `1`.
             if ((first_prefix_byte & 0xC0) != 0xC0) {
-                utfc__prefix_map_deinit(&map);
                 result.error = UTFC_ERROR_INVALID_BYTE;
-                break;
+                return result;
             }
+
+            // We use the 4 highest bits to check how many bytes this prefix has.
             const size_t mask = (size_t)(first_prefix_byte & 0xF0);
             const uint8_t bit_count = ((-utfc__zero_bits_count(mask)) & 0x07);
             const uint8_t prefix_len = (bit_count - 1);
-
             if (data_len < (read_idx + prefix_len)) {
-                utfc__prefix_map_deinit(&map);
                 result.error = UTFC_ERROR_MISSING_BYTES;
-                break;
+                return result;
             }
 
-            utfc__prefix_map_add(&map, &data[read_idx], prefix_len, read_idx);
+            reduced_prefixes[i] = utfc__prefix_pack(&data[read_idx], prefix_len);
             read_idx += prefix_len;
         }
     }
 
-    uint32_t cached_prefix_idx = 0;
+    /* ====== DECOMPRESSION ====== */
+    char cached_prefix[3] = { 0 };
     uint8_t cached_prefix_len = 0;
     while ((read_idx < data_len) && (result.len < header.payload_len)) {
         if (use_prefix_reducer) {
             const uint8_t byte = (uint8_t)data[read_idx];
-            if (byte == 0xC0 || byte == 0xC1 || byte >= 0xF5) {
-                const uint8_t marker_idx = (byte - ((byte >= 0xF5) ? 0xF0 : 0xC0));
-                const utfc__prefix_map_v pmv = map.values[marker_idx];
-
-                cached_prefix_idx = pmv.index;
-                cached_prefix_len = (uint8_t)(pmv.value >> 24); // Length extraction
-
+            if ((byte | 1) == 0xC1 || byte >= 0xF5) {
+                const uint8_t marker_idx = (byte - ((byte >= 0xF5) ? 0xF3 : 0xC0));
+                utfc__prefix_unpack(reduced_prefixes[marker_idx], cached_prefix, &cached_prefix_len);
                 read_idx += 1;
                 continue;
             }
@@ -882,18 +872,16 @@ utfc_result utfc_decompress(const char *data, size_t len, bool terminate) {
             }
         } else {
             if (char_len > 1) { // New prefix
-                cached_prefix_idx = read_idx;
-                cached_prefix_len = char_len - 1;
+                cached_prefix_len = (char_len - 1);
+                memcpy(cached_prefix, &data[read_idx], cached_prefix_len);
                 read_idx += cached_prefix_len;
             }
-            memcpy(&result.value[result.len], &data[cached_prefix_idx], cached_prefix_len);
+            memcpy(&result.value[result.len], cached_prefix, cached_prefix_len);
             result.len += cached_prefix_len;
         }
 
         result.value[result.len++] = data[read_idx++];
     }
-
-    utfc__prefix_map_deinit(&map);
 
     return result;
 }
