@@ -799,7 +799,10 @@ utfc_result utfc_decompress(const char *data, size_t len, bool terminate) {
     uint32_t read_idx = (uint32_t)header.len;
 
     /* ====== PREFIX REDUCER ====== */
-    uint32_t reduced_prefixes[UTFC__MAX_PREFIX_MARKERS] = { 0 };
+    // Only 2 bytes are required, as the length and index of the bytes are both less than 255.
+    // The length and index are packed into a uint16_t.
+    uint16_t reduced_prefixes[UTFC__MAX_PREFIX_MARKERS] = { 0 };
+
     const bool use_prefix_reducer = ((data[UTFC__HEADER_IDX_FLAGS] & UTFC__FLAG_PREFIX_REDUCER) > 0);
     if (use_prefix_reducer) {
         const uint8_t prefix_count = data[read_idx++];
@@ -826,20 +829,24 @@ utfc_result utfc_decompress(const char *data, size_t len, bool terminate) {
                 return result;
             }
 
-            reduced_prefixes[i] = utfc__prefix_pack(&data[read_idx], prefix_len);
+            reduced_prefixes[i] = (uint16_t)(((uint16_t)prefix_len << 8) | (uint8_t)read_idx);
             read_idx += prefix_len;
         }
     }
 
     /* ====== DECOMPRESSION ====== */
-    char cached_prefix[3] = { 0 };
+    uint32_t cached_prefix_idx = 0;
     uint8_t cached_prefix_len = 0;
     while ((read_idx < data_len) && (result.len < header.payload_len)) {
         if (use_prefix_reducer) {
             const uint8_t byte = (uint8_t)data[read_idx];
             if ((byte | 1) == 0xC1 || byte >= 0xF5) {
                 const uint8_t marker_idx = (byte - ((byte >= 0xF5) ? 0xF3 : 0xC0));
-                utfc__prefix_unpack(reduced_prefixes[marker_idx], cached_prefix, &cached_prefix_len);
+
+                const uint16_t rp = reduced_prefixes[marker_idx];
+                cached_prefix_idx = (uint32_t)(rp & 0xFF);
+                cached_prefix_len = (uint8_t)(rp >> 8);
+
                 read_idx += 1;
                 continue;
             }
@@ -872,11 +879,11 @@ utfc_result utfc_decompress(const char *data, size_t len, bool terminate) {
             }
         } else {
             if (char_len > 1) { // New prefix
+                cached_prefix_idx = read_idx;
                 cached_prefix_len = (char_len - 1);
-                memcpy(cached_prefix, &data[read_idx], cached_prefix_len);
                 read_idx += cached_prefix_len;
             }
-            memcpy(&result.value[result.len], cached_prefix, cached_prefix_len);
+            memcpy(&result.value[result.len], &data[cached_prefix_idx], cached_prefix_len);
             result.len += cached_prefix_len;
         }
 
