@@ -32,16 +32,16 @@
  * ┌────────────────────────────────────────────────────────────────────────┐
  * │  bytes: [F0 9F 98 82 F0 9F 98 8A F0 9F 98 91 F0 9F 98 94 F0 9F 98 AD]  │
  * ├────────────────────────────────────────────────────────────────────────┤
- * │                             ┌Prefix reducer                            │
- * │                             │┌──[24 bits]┬Second bit                   │
- * │                      ┌[00000XXX][32 bits]┼Both bits together           │
- * │                      │       │├─[16 bits]┴First bit                    │
- * │                      │       └┴Additional bytes & total bits of length │
- * │ ┌──────────┬───┬───┬─┴─┬────┬─────────────────────────┐                │
- * │ │ 55 38 43 │ ? │ ? │ 0 │ 20 │ F0 9F 98 82 8A 91 94 AD │                │
- * │ ├──────────┼───┴───┼───┴────┼[8 bytes]────────────────┘                │
- * │ └Magic     └Major  ├Flags   ├Payload                                   │
- * │               Minor┘  Length┘                                          │
+ * │                  ┌Prefix reducer                                       │
+ * │                  │┌──[24 bits]┬Second bit                              │
+ * │           ┌[00000XXX][32 bits]┼Both bits together                      │
+ * │           │       │├─[16 bits]┴First bit                               │
+ * │           │       └┴Additional bytes & total bits of lengt             │
+ * │ ┌───┬───┬─┴─┬────┬─────────────────────────┐                           │
+ * │ │ ? │ ? │ 0 │ 20 │ F0 9F 98 82 8A 91 94 AD │                           │
+ * │ ├───┴───┼───┴────┼[8 bytes]────────────────┘                           │
+ * │ └Major  ├Flags   ├Payload                                              │
+ * │    Minor┘  Length┘                                                     │
  * └────────────────────────────────────────────────────────────────────────┘
  * 
  * Written by Nick Ilhan Atamgüc <nickatamguec@outlook.com>
@@ -86,11 +86,10 @@
     #include <riscv_vector.h>
 #endif
 
-#define UTFC__MAGIC_LEN 3
 #define UTFC__MAJOR 0
 #define UTFC__MINOR 2
 #define UTFC__PATCH 0
-#define UTFC__MIN_HEADER_LEN 7 // Magic(3) + Major(1) + Minor(1) + Flags(1) + Length(1)
+#define UTFC__MIN_HEADER_LEN 4 // Major(1) + Minor(1) + Flags(1) + Length(1)
 #define UTFC__MAX_CHAR_LEN 4
 #define UTFC__RESERVED_LEN 500
 #define UTFC__MAX_PAYLOAD_LEN (UINT32_MAX - UTFC__RESERVED_LEN)
@@ -110,18 +109,14 @@
 #endif
 #define UTFC__MAX_PREFIX_MARKERS 13
 
-static const char UTFC__MAGIC_BYTES[] = { 'U', '8', 'C' };
 /// Guaranteed unused bytes in UTF-8. (Perfect for markers)
 static const char UTFC__PREFIX_MARKERS[UTFC__MAX_PREFIX_MARKERS] = { 0xC0, 0xC1, 0xF5, 0xF6, 0xF7, 0xF8, 0xF9, 0xFA, 0xFB, 0xFC, 0xFD, 0xFE, 0xFF };
 
 enum {
-    UTFC__HEADER_IDX_MAGIC1 = 0,
-    UTFC__HEADER_IDX_MAGIC2 = 1,
-    UTFC__HEADER_IDX_MAGIC3 = 2,
-    UTFC__HEADER_IDX_MAJOR  = 3,
-    UTFC__HEADER_IDX_MINOR  = 4,
-    UTFC__HEADER_IDX_FLAGS  = 5,
-    UTFC__HEADER_IDX_LENGTH = 6,
+    UTFC__HEADER_IDX_MAJOR  = 0,
+    UTFC__HEADER_IDX_MINOR  = 1,
+    UTFC__HEADER_IDX_FLAGS  = 2,
+    UTFC__HEADER_IDX_LENGTH = 3,
 };
 
 enum {
@@ -463,9 +458,6 @@ static bool utfc__write_header(utfc_result *result, uint32_t len) {
     }
     result->len = UTFC__MIN_HEADER_LEN;
 
-    // Write magic.
-    memcpy(result->value, UTFC__MAGIC_BYTES, UTFC__MAGIC_LEN);
-
     // Write major.
     result->value[UTFC__HEADER_IDX_MAJOR] = UTFC__MAJOR;
 
@@ -486,9 +478,6 @@ static bool utfc__write_header(utfc_result *result, uint32_t len) {
 
 static bool utfc__read_header(utfc__header *header, const char *data, uint32_t len) {
     if (len < UTFC__MIN_HEADER_LEN) return false;
-
-    // Check magic.
-    if (memcmp(data, UTFC__MAGIC_BYTES, UTFC__MAGIC_LEN) != 0) return false;
 
     // Check major.
     const uint8_t major = data[UTFC__HEADER_IDX_MAJOR];
