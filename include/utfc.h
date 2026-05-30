@@ -79,7 +79,7 @@
 
 #if defined(UTFC__X86)
     #include <immintrin.h>
-#elif defined(_M_ARM64) || defined(__arch64__) || defined(__ARM_NEON) || defined(__ARM_NEON__)
+#elif defined(_M_ARM64) || defined(__aarch64__) || defined(__ARM_NEON) || defined(__ARM_NEON__)
     #define UTFC__NEON 1
     #include <arm_neon.h>
 #elif defined(__riscv_vector)
