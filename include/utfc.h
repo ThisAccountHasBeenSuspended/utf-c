@@ -86,6 +86,9 @@
     #include <riscv_vector.h>
 #endif
 
+#define UTFC__BIT_SIZE (sizeof(size_t) * 8)
+#define UTFC__BIT_SIZE_SHIFT (UTFC__BIT_SIZE - 8)
+
 #define UTFC__MAJOR 0
 #define UTFC__MINOR 2
 #define UTFC__PATCH 0
@@ -192,30 +195,30 @@ typedef struct {
 //  ── PRIVATE ──────────────────────────────────────────────────────────────
 
 /// A helper function to count the `0` bits from the LSB to the MSB until the first `1` bit was found.
-static inline uint8_t utfc__zero_bits_count(size_t mask) {
+static inline uint8_t utfc__count_zeros(size_t mask, bool reversed) {
     if (mask == 0) return 0;
     size_t result;
     #if defined(_MSC_VER)
         #if defined(UTFC__BMI_INTRINSICS)
             #if defined(UTFC_64BIT)
-                result = (size_t)(_tzcnt_u64(mask));
+                result = (size_t)(reversed ? _lzcnt_u64(mask) : _tzcnt_u64(mask));
             #else
-                result = (size_t)(_tzcnt_u32(mask));
+                result = (size_t)(reversed ? _lzcnt_u32(mask) : _tzcnt_u32(mask));
             #endif
         #else
             unsigned long idx;
             #if defined(UTFC_64BIT)
-                unsigned char _ = _BitScanForward64(&idx, mask);
+                unsigned char _ = (reversed ? _BitScanReverse64(&idx, mask) : _BitScanForward64(&idx, mask));
             #else
-                unsigned char _ = _BitScanForward(&idx, mask);
+                unsigned char _ = (reversed ? _BitScanReverse(&idx, mask) : _BitScanForward(&idx, mask));
             #endif
-            result = (size_t)idx;
+            result = (size_t)(reversed ? ((UTFC__BIT_SIZE - 1) - idx) : idx);
         #endif
     #else
         #if defined(UTFC_64BIT)
-            result = (size_t)(__builtin_ctzll(mask));
+            result = (size_t)(reversed ? __builtin_clzll(mask) : __builtin_ctzll(mask));
         #else
-            result = (size_t)(__builtin_ctz(mask));
+            result = (size_t)(reversed ? __builtin_clz(mask) : __builtin_ctz(mask));
         #endif
     #endif
     return (uint8_t)result;
@@ -293,7 +296,7 @@ static bool utfc__next_non_ascii(const char *value, uint32_t len, uint32_t idx, 
             const __m512i vec = _mm512_loadu_si512((const __m512i *)&value[idx]);
             const unsigned long long mask = _mm512_movepi8_mask(vec);
             if (mask != 0) {
-                *out = (uint32_t)utfc__zero_bits_count((size_t)mask);
+                *out = (uint32_t)utfc__count_zeros((size_t)mask, false);
                 *out += idx;
                 return true;
             }
@@ -321,7 +324,7 @@ static bool utfc__next_non_ascii(const char *value, uint32_t len, uint32_t idx, 
             const __m256i vec = _mm256_loadu_si256((const __m256i *)&value[idx]);
             const int mask = _mm256_movemask_epi8(vec);
             if (mask != 0) {
-                *out = (uint32_t)utfc__zero_bits_count((size_t)mask);
+                *out = (uint32_t)utfc__count_zeros((size_t)mask, false);
                 *out += idx;
                 return true;
             }
@@ -368,7 +371,7 @@ static bool utfc__next_non_ascii(const char *value, uint32_t len, uint32_t idx, 
                 const unsigned short mask = ((unsigned short)high << 8) | (unsigned short)low;
             #endif
             if (mask != 0) {
-                *out = idx + (uint32_t)utfc__zero_bits_count((size_t)mask);
+                *out = (idx + (uint32_t)utfc__count_zeros((size_t)mask, false));
                 return true;
             }
         #endif
@@ -399,11 +402,12 @@ static bool utfc__next_non_ascii(const char *value, uint32_t len, uint32_t idx, 
  * - The `return` value `-2` means that the continuation bytes are invalid.
  */
 static int8_t utfc__char_len(const char *value, uint32_t len, uint32_t idx) {
-    const char first_byte = value[idx];
-    if ((first_byte & 0xC0) == 0x00) return 1; // Single-byte character
-    if ((first_byte & 0xC0) == 0x80) return 0; // Invalid start byte
-    const size_t mask = (size_t)(first_byte & 0xF0);
-    const uint8_t bit_count = ((-utfc__zero_bits_count(mask)) & 0x07);
+    const uint8_t first_byte = (uint8_t)value[idx];
+    if (first_byte < 0x80) return 1; // Single-byte character
+
+    const size_t mask = ((size_t)~first_byte << UTFC__BIT_SIZE_SHIFT);
+    const uint8_t bit_count = utfc__count_zeros(mask, true);
+    if (bit_count < 2 || bit_count > 4) return 0; // Invalid start byte
 
     // Do that many bytes even exist?
     if ((len - idx) < bit_count) return -1;
@@ -411,12 +415,12 @@ static int8_t utfc__char_len(const char *value, uint32_t len, uint32_t idx) {
     // The `fallthrough` comment prevents a warning from the compiler,
     // because `case 3` and `case 2` are also entered when `bit_count == 4`.
     switch (bit_count) {
-        case 4: if ((value[idx + 3] & 0xC0) != 0x80) return -2; // fallthrough
-        case 3: if ((value[idx + 2] & 0xC0) != 0x80) return -2; // fallthrough
-        case 2: if ((value[idx + 1] & 0xC0) != 0x80) return -2; // fallthrough
+        case 4: if (((uint8_t)value[idx + 3] & 0xC0) != 0x80) return -2; // fallthrough
+        case 3: if (((uint8_t)value[idx + 2] & 0xC0) != 0x80) return -2; // fallthrough
+        case 2: if (((uint8_t)value[idx + 1] & 0xC0) != 0x80) return -2; // fallthrough
     }
 
-    return bit_count;
+    return (int8_t)bit_count;
 }
 
 /**
@@ -801,18 +805,16 @@ utfc_result utfc_decompress(const char *data, size_t len, bool terminate) {
         }
 
         for (uint8_t i = 0; i < prefix_count; i++) {
-            const char first_prefix_byte = data[read_idx];
+            const uint8_t first_prefix_byte = (uint8_t)data[read_idx];
 
-            // To be a valid "first"-byte of a prefix, the 2 highest bits must be set to `1`.
-            if ((first_prefix_byte & 0xC0) != 0xC0) {
+            // We use the 4 highest bits to check how many bytes this prefix has.
+            const size_t mask = ((size_t)~first_prefix_byte << UTFC__BIT_SIZE_SHIFT);
+            const int8_t bit_count = utfc__count_zeros(mask, true);
+            if (bit_count < 2 || bit_count > 4) {
                 result.error = UTFC_ERROR_INVALID_BYTE;
                 return result;
             }
-
-            // We use the 4 highest bits to check how many bytes this prefix has.
-            const size_t mask = (size_t)(first_prefix_byte & 0xF0);
-            const uint8_t bit_count = ((-utfc__zero_bits_count(mask)) & 0x07);
-            const uint8_t prefix_len = (bit_count - 1);
+            const int8_t prefix_len = (bit_count - 1);
             if (data_len < (read_idx + prefix_len)) {
                 result.error = UTFC_ERROR_MISSING_BYTES;
                 return result;
@@ -841,10 +843,10 @@ utfc_result utfc_decompress(const char *data, size_t len, bool terminate) {
             }
         }
 
-        // -2:  Missing bytes
-        // -1:  Invalid continuation bytes
-        // 0:   cached_prefix + value
-        // 1:   ASCII (no prefix)
+        //  -2: Missing bytes
+        //  -1: Invalid continuation bytes
+        //   0: cached_prefix + value
+        //   1: ASCII (no prefix)
         // 2-4: new prefix + value
         const int8_t char_len = utfc__char_len(data, data_len, read_idx);
         if (char_len < 0) { // Something is wrong
