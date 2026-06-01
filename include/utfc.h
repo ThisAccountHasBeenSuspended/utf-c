@@ -24,8 +24,8 @@
  * └────────────────────────────────────────────────────────────────────────────────┘
  * 
  * To use SIMD, the following must be defined:
- * - AVX512BW      = UTFC_SIMD_512
- * - AVX2          = UTFC_SIMD_256
+ * - AVX512BW,RVV  = UTFC_SIMD_512
+ * - AVX2,RVV      = UTFC_SIMD_256
  * - SSE2,NEON,RVV = UTFC_SIMD_128
  * 
  * The following example shows the result of "😂😊😑😔😭":

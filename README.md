@@ -16,16 +16,16 @@ Example:
 ```
 value: "😂😊😑😔😭"
 bytes: [F0 9F 98 82 F0 9F 98 8A F0 9F 98 91 F0 9F 98 94 F0 9F 98 AD]
-                            ┌Prefix reducer
-                            │┌──[24 bits]┬Second bit
-                     ┌[00000XXX][32 bits]┼Both bits together
-                     │       │├─[16 bits]┴First bit
-                     │       └┴Additional bytes & total bits of length
-┌──────────┬───┬───┬─┴─┬────┬─────────────────────────┐
-│ 55 38 43 │ ? │ ? │ 0 │ 20 │ F0 9F 98 82 8A 91 94 AD │
-├──────────┼───┴───┼───┴────┼[8 bytes]────────────────┘
-└Magic     └Major  ├Flags   ├"😂😊😑😔😭" (20 bytes)
-              Minor┘  Length┘
+                 ┌Prefix reducer
+                 │┌──[24 bits]┬Second bit
+          ┌[00000XXX][32 bits]┼Both bits together
+          │       │├─[16 bits]┴First bit
+          │       └┴Additional bytes & total bits of length
+┌───┬───┬─┴─┬────┬─────────────────────────┐
+│ ? │ ? │ 0 │ 20 │ F0 9F 98 82 8A 91 94 AD │
+├───┴───┼───┴────┼[8 bytes]────────────────┘
+└Major  ├Flags   ├"😂😊😑😔😭" (20 bytes)
+   Minor┘  Length┘
 ```
 
 ## 🐳 Test
@@ -37,7 +37,7 @@ Enter our build-environment:
 
 ### Commands
 Build and run tests:
-`make run` or `make arm=1 run`
+`make run` or `make arm=1 run` or `make riscv=1 run`
 
 Remove all build files:
 `make clean`
