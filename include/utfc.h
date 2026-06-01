@@ -23,25 +23,25 @@
  * │ SOFTWARE.                                                                      │
  * └────────────────────────────────────────────────────────────────────────────────┘
  * 
- * To use SIMD and increase performance, the following must be defined:
- * - AVX512BW  = UTFC_SIMD_512
- * - AVX2      = UTFC_SIMD_256
- * - SSE2,NEON = UTFC_SIMD_128
+ * To use SIMD, the following must be defined:
+ * - AVX512BW      = UTFC_SIMD_512
+ * - AVX2          = UTFC_SIMD_256
+ * - SSE2,NEON,RVV = UTFC_SIMD_128
  * 
  * The following example shows the result of "😂😊😑😔😭":
  * ┌────────────────────────────────────────────────────────────────────────┐
  * │  bytes: [F0 9F 98 82 F0 9F 98 8A F0 9F 98 91 F0 9F 98 94 F0 9F 98 AD]  │
  * ├────────────────────────────────────────────────────────────────────────┤
- * │                  ┌Prefix reducer                                       │
- * │                  │┌──[24 bits]┬Second bit                              │
- * │           ┌[00000XXX][32 bits]┼Both bits together                      │
- * │           │       │├─[16 bits]┴First bit                               │
- * │           │       └┴Additional bytes & total bits of lengt             │
- * │ ┌───┬───┬─┴─┬────┬─────────────────────────┐                           │
- * │ │ ? │ ? │ 0 │ 20 │ F0 9F 98 82 8A 91 94 AD │                           │
- * │ ├───┴───┼───┴────┼[8 bytes]────────────────┘                           │
- * │ └Major  ├Flags   ├Payload                                              │
- * │    Minor┘  Length┘                                                     │
+ * │                        ┌Prefix reducer                                 │
+ * │                        │┌──[24 bits]┬Second bit                        │
+ * │                 ┌[00000XXX][32 bits]┼Both bits together                │
+ * │                 │       │├─[16 bits]┴First bit                         │
+ * │                 │       └┴Additional bytes & total bits of length      │
+ * │       ┌───┬───┬─┴─┬────┬─────────────────────────┐                     │
+ * │       │ ? │ ? │ 0 │ 20 │ F0 9F 98 82 8A 91 94 AD │                     │
+ * │       ├───┴───┼───┴────┼[8 bytes]────────────────┘                     │
+ * │       └Major  ├Flags   ├Payload                                        │
+ * │          Minor┘  Length┘                                               │
  * └────────────────────────────────────────────────────────────────────────┘
  * 
  * Written by Nick Ilhan Atamgüc <nickatamguec@outlook.com>
@@ -49,7 +49,7 @@
 
 #if !defined(UTFC_H)
 
-//  ── PUBLIC ───────────────────────────────────────────────────────────────
+// ── PUBLIC ───────────────────────────────────────────────────────────────
 #if defined(__cplusplus)
 extern "C" {
 #endif // __cplusplus
@@ -60,24 +60,24 @@ extern "C" {
 #include <string.h>
 #include <stdlib.h>
 
-#define UTFC_PRIV_MAJOR 0
-#define UTFC_PRIV_MINOR 2
-#define UTFC_PRIV_PATCH 0
-#define UTFC_PRIV_RESERVED_LEN 500
-#define UTFC_PRIV_MAX_PAYLOAD_LEN (UINT32_MAX - UTFC_PRIV_RESERVED_LEN)
+#define UTFC_MAJOR 0
+#define UTFC_MINOR 2
+#define UTFC_PATCH 0
+#define UTFC_RESERVED_LEN 500
+#define UTFC_MAX_PAYLOAD_LEN (UINT32_MAX - UTFC_RESERVED_LEN)
 // This is the minimum value of various prefixes for a reduction.
 // A value below 5 is inefficient and not recommended.
 // To disable "Prefix reducer", set the value to `UINT32_MAX` or higher.
-#if !defined(UTFC_PRIV_PREFIX_REDUCER_THRESHOLD)
-    #define UTFC_PRIV_PREFIX_REDUCER_THRESHOLD 5
+#if !defined(UTFC_PREFIX_REDUCER_THRESHOLD)
+    #define UTFC_PREFIX_REDUCER_THRESHOLD 5
 #endif
 // This is the limit of different prefixes that can be selected for sorting.
-#if !defined(UTFC_PRIV_PREFIX_REDUCER_STACK_LIMIT)
-    #define UTFC_PRIV_PREFIX_REDUCER_STACK_LIMIT 24
-#elif (UTFC_PRIV_PREFIX_REDUCER_STACK_LIMIT == 0) || (UTFC_PRIV_PREFIX_REDUCER_STACK_LIMIT > 48)
-    #warning "`UTFC_PRIV_PREFIX_REDUCER_STACK_LIMIT` is invalid and has been changed to `32`"
-    #undef UTFC_PRIV_PREFIX_REDUCER_STACK_LIMIT
-    #define UTFC_PRIV_PREFIX_REDUCER_STACK_LIMIT 32
+#if !defined(UTFC_PREFIX_REDUCER_STACK_LIMIT)
+    #define UTFC_PREFIX_REDUCER_STACK_LIMIT 24
+#elif (UTFC_PREFIX_REDUCER_STACK_LIMIT == 0) || (UTFC_PREFIX_REDUCER_STACK_LIMIT > 48)
+    #warning "`UTFC_PREFIX_REDUCER_STACK_LIMIT` is invalid and has been changed to `32`"
+    #undef UTFC_PREFIX_REDUCER_STACK_LIMIT
+    #define UTFC_PREFIX_REDUCER_STACK_LIMIT 32
 #endif
 
 typedef enum utfc_error {
@@ -88,7 +88,7 @@ typedef enum utfc_error {
     /// A (re)allocation failed.
     UTFC_ERROR_OUT_OF_MEMORY,
     /// Your string length requires too many bytes.
-    /// - For compression the limit is: `UINT32_MAX - UTFC_PRIV_RESERVED_LEN`
+    /// - For compression the limit is: `UINT32_MAX - UTFC_RESERVED_LEN`
     /// - For decompression the limit is: `UINT32_MAX`
     UTFC_ERROR_TOO_MANY_BYTES,
     /// More bytes were expected.
@@ -124,33 +124,32 @@ utfc_result utfc_decompress(const char *data, size_t len, bool terminate);
 #if defined(__cplusplus)
 }
 #endif // __cplusplus
-//  ── PUBLIC END ───────────────────────────────────────────────────────────
+// ── PUBLIC END ───────────────────────────────────────────────────────────
 
-//  ── PRIVATE ──────────────────────────────────────────────────────────────
+// ── PRIVATE ──────────────────────────────────────────────────────────────
 #if defined(UTFC_IMPLEMENTATION)
 
 #if defined(_MSC_VER)
     #include <intrin.h>
 #endif
 
-#if defined(UTFC_PRIV_X86)
-    #include <immintrin.h>
-#elif defined(_M_ARM64) || defined(__aarch64__) || defined(__ARM_NEON) || defined(__ARM_NEON__)
-    #define UTFC_PRIV_NEON 1
-    #include <arm_neon.h>
-#elif defined(__riscv_vector)
-    #include <riscv_vector.h>
-#endif
-
 #if defined(_M_IX86) || defined(_M_X64) || defined(_M_AMD64) || defined(__i386__) || defined(__x86_64__)
     #define UTFC_PRIV_X86 1
+    #include <immintrin.h>
     #if defined(__BMI__) || (defined(_MSC_VER) && defined(__AVX2__))
         #define UTFC_PRIV_BMI_INTRINSICS 1
     #endif
 #elif defined(_M_ARM) || defined(_M_ARM64) || defined(__arm__) || defined(__aarch64__)
     #define UTFC_PRIV_ARM 1
+    #if defined(__ARM_NEON) || defined(__ARM_NEON__)
+        #define UTFC_PRIV_NEON 1
+        #include <arm_neon.h>
+    #endif
 #elif defined(__riscv) || defined(__riscv__)
     #define UTFC_PRIV_RISCV 1
+    #if defined(__riscv_vector)
+        #include <riscv_vector.h>
+    #endif
 #endif
 
 #if !defined(UTFC_64BIT)
@@ -164,12 +163,24 @@ utfc_result utfc_decompress(const char *data, size_t len, bool terminate);
 
 #define UTFC_PRIV_MIN_HEADER_LEN 4 // Major(1) + Minor(1) + Flags(1) + Length(1)
 #define UTFC_PRIV_MAX_CHAR_LEN 4
-#define UTFC_PRIV_RESERVED_LEN 500
-#define UTFC_PRIV_MAX_PAYLOAD_LEN (UINT32_MAX - UTFC_PRIV_RESERVED_LEN)
 #define UTFC_PRIV_MAX_PREFIX_MARKERS 13
 
 /// Guaranteed unused bytes in UTF-8. (Perfect for markers)
-static const char UTFC_PRIV_PREFIX_MARKERS[UTFC_PRIV_MAX_PREFIX_MARKERS] = { 0xC0, 0xC1, 0xF5, 0xF6, 0xF7, 0xF8, 0xF9, 0xFA, 0xFB, 0xFC, 0xFD, 0xFE, 0xFF };
+static const char UTFC_PRIV_PREFIX_MARKERS[UTFC_PRIV_MAX_PREFIX_MARKERS] = {
+    0xC0, // 192 | 1100_0000
+    0xC1, // 193 | 1100_0001
+    0xF5, // 245 | 1111_0101
+    0xF6, // 246 | 1111_0110
+    0xF7, // 247 | 1111_0111
+    0xF8, // 248 | 1111_1000
+    0xF9, // 249 | 1111_1001
+    0xFA, // 250 | 1111_1010
+    0xFB, // 251 | 1111_1011
+    0xFC, // 252 | 1111_1100
+    0xFD, // 253 | 1111_1101
+    0xFE, // 254 | 1111_1110
+    0xFF, // 255 | 1111_1111
+};
 
 typedef enum utfc_priv_header_idx {
     UTFC_PRIV_HEADER_IDX_MAJOR  = 0,
@@ -189,7 +200,7 @@ typedef enum utfc_priv_extra_len {
     /// The maximum length is 16.777.215 bytes (24 bits).
     UTFC_PRIV_EXTRA_LENGTH_BYTES_2 = 2,
     /// 3 additional bytes (24 bits) for the length.
-    /// The maximum length is (4.294.967.295 - UTFC_PRIV_RESERVED_LEN) bytes (32 bits).
+    /// The maximum length is (4.294.967.295 - UTFC_RESERVED_LEN) bytes (32 bits).
     UTFC_PRIV_EXTRA_LENGTH_BYTES_3 = 3,
 } utfc_priv_extra_len;
 
@@ -254,8 +265,6 @@ static inline uint8_t utfc_priv_count_zeros(size_t mask, bool reversed) {
 }
 
 static bool utfc_priv_prefix_list_init(utfc_priv_prefix_list *list) {
-    if (list->cap > 0) return true; // Already initialized
-
     utfc_priv_prefix_list_v *tmp_values = (utfc_priv_prefix_list_v *)malloc(5 * sizeof(*tmp_values));
     if (tmp_values == NULL) return false;
 
@@ -286,8 +295,6 @@ static inline void utfc_priv_prefix_unpack(uint32_t value, char *prefix_out, uin
 }
 
 static void utfc_priv_prefix_list_add(utfc_priv_prefix_list *list, const char *prefix, uint8_t len, uint32_t idx) {
-    if (list->cap == 0) return; // Not initialized
-
     if (list->len == list->cap) {
         if (list->cap > (UINT32_MAX - 5)) return;
         const uint32_t new_cap = (list->cap + 5);
@@ -298,10 +305,11 @@ static void utfc_priv_prefix_list_add(utfc_priv_prefix_list *list, const char *p
         list->cap = new_cap;
     }
 
-    list->values[list->len++] = (utfc_priv_prefix_list_v){
+    utfc_priv_prefix_list_v new_value = {
         .index = idx,
         .value = utfc_priv_prefix_pack(prefix, len)
     };
+    list->values[list->len++] = new_value;
 }
 
 static bool utfc_priv_next_non_ascii(const char *value, uint32_t len, uint32_t idx, uint32_t *out) {
@@ -318,7 +326,7 @@ static bool utfc_priv_next_non_ascii(const char *value, uint32_t len, uint32_t i
             // (`-1` means that there is no match)
             const long pos = __riscv_vfirst_m_b2(mask, 64);
             if (pos >= 0) {
-                *out = idx + (uint32_t)pos;
+                *out = (idx + (uint32_t)pos);
                 return true;
             }
         #else
@@ -346,7 +354,7 @@ static bool utfc_priv_next_non_ascii(const char *value, uint32_t len, uint32_t i
             // (`-1` means that there is no match)
             const long pos = __riscv_vfirst_m_b4(mask, 32);
             if (pos >= 0) {
-                *out = idx + (uint32_t)pos;
+                *out = (idx + (uint32_t)pos);
                 return true;
             }
         #else
@@ -374,7 +382,7 @@ static bool utfc_priv_next_non_ascii(const char *value, uint32_t len, uint32_t i
             // (`-1` means that there is no match)
             const long pos = __riscv_vfirst_m_b8(mask, 16);
             if (pos >= 0) {
-                *out = idx + (uint32_t)pos;
+                *out = (idx + (uint32_t)pos);
                 return true;
             }
         #else
@@ -397,7 +405,7 @@ static bool utfc_priv_next_non_ascii(const char *value, uint32_t len, uint32_t i
                 const unsigned char low = vgetq_lane_u8(output, 0);
                 const unsigned char high = vgetq_lane_u8(output, 8);
                 // Combine into 16-bit mask.
-                const unsigned short mask = ((unsigned short)high << 8) | (unsigned short)low;
+                const unsigned short mask = (((unsigned short)high << 8) | (unsigned short)low);
             #endif
             if (mask != 0) {
                 *out = (idx + (uint32_t)utfc_priv_count_zeros((size_t)mask, false));
@@ -475,11 +483,11 @@ static bool utfc_priv_handle_ascii(utfc_result *result, const char *data, uint32
 
 static bool utfc_priv_write_header(utfc_result *result, uint32_t len) {
     uint8_t extra_length_bytes = UTFC_PRIV_EXTRA_LENGTH_BYTES_0; // Up to 8  bits
-    if (len > (UINT32_MAX ^ 0xFF000000)) { // ----------------- Up to 32 bits
+    if (len > (UINT32_MAX ^ 0xFF000000)) { // --------------------- Up to 32 bits
         extra_length_bytes = UTFC_PRIV_EXTRA_LENGTH_BYTES_3;
-    } else if (len > UINT16_MAX) { // ------------------------- Up to 24 bits
+    } else if (len > UINT16_MAX) { // ----------------------------- Up to 24 bits
         extra_length_bytes = UTFC_PRIV_EXTRA_LENGTH_BYTES_2;
-    } else if (len > UINT8_MAX) { // -------------------------- Up to 16 bits
+    } else if (len > UINT8_MAX) { // ------------------------------ Up to 16 bits
         extra_length_bytes = UTFC_PRIV_EXTRA_LENGTH_BYTES_1;
     }
 
@@ -492,10 +500,10 @@ static bool utfc_priv_write_header(utfc_result *result, uint32_t len) {
     result->len = UTFC_PRIV_MIN_HEADER_LEN;
 
     // Write major.
-    result->value[UTFC_PRIV_HEADER_IDX_MAJOR] = UTFC_PRIV_MAJOR;
+    result->value[UTFC_PRIV_HEADER_IDX_MAJOR] = UTFC_MAJOR;
 
     // Write minor.
-    result->value[UTFC_PRIV_HEADER_IDX_MINOR] = UTFC_PRIV_MINOR;
+    result->value[UTFC_PRIV_HEADER_IDX_MINOR] = UTFC_MINOR;
 
     // Write flags.
     char flags = 0;
@@ -514,11 +522,11 @@ static bool utfc_priv_read_header(utfc_priv_header *header, const char *data, ui
 
     // Check major.
     const uint8_t major = data[UTFC_PRIV_HEADER_IDX_MAJOR];
-    if (major != UTFC_PRIV_MAJOR) return false;
+    if (major != UTFC_MAJOR) return false;
 
     // Check minor.
     header->minor = data[UTFC_PRIV_HEADER_IDX_MINOR];
-    if (header->minor > UTFC_PRIV_MINOR) return false;
+    if (header->minor > UTFC_MINOR) return false;
 
     // Check flags.
     header->flags = data[UTFC_PRIV_HEADER_IDX_FLAGS];
@@ -537,13 +545,13 @@ static bool utfc_priv_read_header(utfc_priv_header *header, const char *data, ui
 
 static void utfc_priv_prefix_reducer_sort_desc(const utfc_priv_prefix_list *prefix_list, uint32_t out[], uint8_t *out_len) {
     uint8_t max_values = prefix_list->len;
-    if (max_values > UTFC_PRIV_PREFIX_REDUCER_STACK_LIMIT) {
-        max_values = UTFC_PRIV_PREFIX_REDUCER_STACK_LIMIT;
+    if (max_values > UTFC_PREFIX_REDUCER_STACK_LIMIT) {
+        max_values = UTFC_PREFIX_REDUCER_STACK_LIMIT;
     }
 
     // NOTE: The minimum `value_count` for an element should be `3`.
     // (A value below 3 is too inefficient)
-    uint32_t value_count[UTFC_PRIV_PREFIX_REDUCER_STACK_LIMIT] = { 0 };
+    uint32_t value_count[UTFC_PREFIX_REDUCER_STACK_LIMIT] = { 0 };
 
     // Select new prefixes and count.
     for (uint32_t i = 0; i < prefix_list->len && *out_len < max_values; i++) {
@@ -624,10 +632,10 @@ static void utfc_priv_prefix_reducer_sort_desc(const utfc_priv_prefix_list *pref
 }
 
 static void utfc_priv_prefix_reducer(utfc_result *result, const utfc_priv_prefix_list *prefix_list) {
-    if (prefix_list->len < UTFC_PRIV_PREFIX_REDUCER_THRESHOLD) return;
+    if (prefix_list->len < UTFC_PREFIX_REDUCER_THRESHOLD) return;
 
     // We need a descending sorted list of the strongest prefixes found.
-    uint32_t sorted_prefixes[UTFC_PRIV_PREFIX_REDUCER_STACK_LIMIT] = { 0 };
+    uint32_t sorted_prefixes[UTFC_PREFIX_REDUCER_STACK_LIMIT] = { 0 };
     uint8_t sorted_prefixes_len = 0;
     utfc_priv_prefix_reducer_sort_desc(prefix_list, sorted_prefixes, &sorted_prefixes_len);
     if (sorted_prefixes_len == 0) return;
@@ -635,7 +643,7 @@ static void utfc_priv_prefix_reducer(utfc_result *result, const utfc_priv_prefix
     // Set header flag.
     result->value[UTFC_PRIV_HEADER_IDX_FLAGS] |= UTFC_PRIV_FLAG_PREFIX_REDUCER;
 
-    /* ====== REMOVE ====== */
+    /* REMOVE */
     // We loop through the entire list and replace the selected prefixes with markers.
     for (uint32_t i = prefix_list->len; i-- > 0;) {
         const utfc_priv_prefix_list_v plv = prefix_list->values[i];
@@ -666,7 +674,7 @@ static void utfc_priv_prefix_reducer(utfc_result *result, const utfc_priv_prefix
         }
     }
 
-    /* ====== ADD ====== */
+    /* ADD */
     const uint8_t header_len = UTFC_PRIV_MIN_HEADER_LEN + (result->value[UTFC_PRIV_HEADER_IDX_FLAGS] & UTFC_PRIV_FLAG_EXTRA_LENGTH_BYTES_3);
 
     // Set the byte for the length of the reduced prefixes directly after the header.
@@ -699,7 +707,7 @@ static void utfc_priv_prefix_reducer(utfc_result *result, const utfc_priv_prefix
 utfc_result utfc_compress(const char *data, size_t len) {
     utfc_result result = { 0 };
     
-    if (len > UTFC_PRIV_MAX_PAYLOAD_LEN) {
+    if (len > UTFC_MAX_PAYLOAD_LEN) {
         result.error = UTFC_ERROR_TOO_MANY_BYTES;
         return result;
     }
@@ -805,7 +813,7 @@ utfc_result utfc_decompress(const char *data, size_t len, bool terminate) {
 
     uint32_t read_idx = (uint32_t)header.len;
 
-    /* ====== PREFIX REDUCER ====== */
+    /* PREFIX REDUCER */
     // Only 2 bytes are required, as the length and index of the bytes are both less than 255.
     // The length and index are packed into a uint16_t.
     uint16_t reduced_prefixes[UTFC_PRIV_MAX_PREFIX_MARKERS] = { 0 };
@@ -839,7 +847,7 @@ utfc_result utfc_decompress(const char *data, size_t len, bool terminate) {
         }
     }
 
-    /* ====== DECOMPRESSION ====== */
+    /* DECOMPRESSION */
     uint32_t cached_prefix_idx = 0;
     uint8_t cached_prefix_len = 0;
     while ((read_idx < data_len) && (result.len < header.payload_len)) {
@@ -899,6 +907,6 @@ utfc_result utfc_decompress(const char *data, size_t len, bool terminate) {
 }
 
 #endif // UTFC_IMPLEMENTATION
-//  ── PRIVATE END ──────────────────────────────────────────────────────────
+// ── PRIVATE END ──────────────────────────────────────────────────────────
 
 #endif // UTFC_H
