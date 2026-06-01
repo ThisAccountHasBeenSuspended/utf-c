@@ -728,14 +728,14 @@ utfc_result utfc_compress(const char *data, size_t len) {
     uint32_t read_idx = 0;
     uint32_t cached_prefix_idx = 0;
     uint8_t cached_prefix_len = 0;
-    while (read_idx < len) {
-        const int8_t char_len = utfc_priv_char_len(data, len, read_idx);
+    while (read_idx < data_len) {
+        const int8_t char_len = utfc_priv_char_len(data, data_len, read_idx);
         if (char_len <= 0) {
             // Something is wrong with this character.
             // We will use the next (up to) 4 bytes to find the problem.
 
             result.error = (char_len == -1 ? UTFC_ERROR_MISSING_BYTES : UTFC_ERROR_INVALID_BYTE);
-            const uint32_t remaining_bytes = (len - read_idx);
+            const uint32_t remaining_bytes = (data_len - read_idx);
             result.len = ((remaining_bytes > UTFC_PRIV_MAX_CHAR_LEN) ? UTFC_PRIV_MAX_CHAR_LEN : remaining_bytes);
             memcpy(result.value, &data[read_idx], result.len);
 
@@ -772,8 +772,8 @@ utfc_result utfc_compress(const char *data, size_t len) {
         }
         // If the next byte is also ASCII, we use SIMD to find the next
         // non-ASCII byte and efficiently copy everything up to that index.
-        else if ((read_idx + 1) < len && (data[read_idx + 1] & 0x80) == 0) {
-            if (utfc_priv_handle_ascii(&result, data, len, &read_idx)) break;
+        else if ((read_idx + 1) < data_len && (data[read_idx + 1] & 0x80) == 0) {
+            if (utfc_priv_handle_ascii(&result, data, data_len, &read_idx)) break;
             continue;
         }
 
