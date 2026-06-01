@@ -48,6 +48,7 @@
  */
 
 #if !defined(UTFC_H)
+#define UTFC_H
 
 // ── PUBLIC ───────────────────────────────────────────────────────────────
 #if defined(__cplusplus)
@@ -109,13 +110,14 @@ typedef struct utfc_result {
  * This function should always be called after `utfc_compression`
  * and `utfc_decompression` when the result is no longer needed.
  */
-inline void utfc_result_deinit(utfc_result *result) {
-    result->error = UTFC_ERROR_NONE;
-    result->len = 0;
-    if (result != NULL) {
+static inline void utfc_result_deinit(utfc_result *result) {
+    if (result == NULL) return;
+    if (result->value != NULL) {
         free(result->value);
-        result = NULL;
+        result->value = NULL;
     }
+    result->len = 0;
+    result->error = UTFC_ERROR_NONE;
 }
 
 utfc_result utfc_compress(const char *data, size_t len);
@@ -737,7 +739,7 @@ utfc_result utfc_compress(const char *data, size_t len) {
             result.len = ((remaining_bytes > UTFC_PRIV_MAX_CHAR_LEN) ? UTFC_PRIV_MAX_CHAR_LEN : remaining_bytes);
             memcpy(result.value, &data[read_idx], result.len);
 
-            return result;
+            break;
         }
 
         const uint8_t prefix_len = (char_len - 1);
@@ -756,7 +758,11 @@ utfc_result utfc_compress(const char *data, size_t len) {
                 cached_prefix_idx = read_idx;
                 cached_prefix_len = prefix_len;
 
-                utfc_priv_prefix_list_add(&prefix_list, &data[cached_prefix_idx], cached_prefix_len, result.len);
+                // Skip 1-byte prefixes (from 2-byte UTF-8 characters like é, ü, ñ).
+                // 1-byte prefixes save nothing per occurrence but add table overhead -> buffer overflow risk.
+                if (cached_prefix_len > 1) {
+                    utfc_priv_prefix_list_add(&prefix_list, &data[cached_prefix_idx], cached_prefix_len, result.len);
+                }
 
                 memcpy(&result.value[result.len], &data[read_idx], prefix_len);
                 result.len += prefix_len;
@@ -774,10 +780,15 @@ utfc_result utfc_compress(const char *data, size_t len) {
         result.value[result.len++] = data[read_idx++];
     }
 
-    utfc_priv_prefix_reducer(&result, &prefix_list);
+    if (result.error == UTFC_ERROR_NONE) {
+        utfc_priv_prefix_reducer(&result, &prefix_list);
 
-    char *resized_value = (char *)realloc(result.value, result.len * sizeof(*resized_value));
-    if (resized_value != NULL) result.value = resized_value;
+        // Our final step is to reallocate the value to the correct length of the result.
+        // Before: UTFC_PRIV_MIN_HEADER_LEN + (Extra length 0-3) + (Original text length)
+        // After:  UTFC_PRIV_MIN_HEADER_LEN + (Extra length 0-3) + (Payload length)
+        char *resized_value = (char *)realloc(result.value, (result.len * sizeof(*resized_value)));
+        if (resized_value != NULL) result.value = resized_value;
+    }
 
     utfc_priv_prefix_list_deinit(&prefix_list);
 
