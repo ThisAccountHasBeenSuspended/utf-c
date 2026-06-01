@@ -825,9 +825,14 @@ utfc_result utfc_decompress(const char *data, size_t len, bool terminate) {
     uint32_t read_idx = (uint32_t)header.len;
 
     /* PREFIX REDUCER */
-    // Only 2 bytes are required, as the length and index of the bytes are both less than 255.
-    // The length and index are packed into a uint16_t.
-    uint16_t reduced_prefixes[UTFC_PRIV_MAX_PREFIX_MARKERS] = { 0 };
+    // The length and index are packed into a single uint8_t.
+    // - We need a maximum of 2 bits for the length.
+    // - We need a maximum of 6 bits for the index (value 63).
+    // If we have the maximum number of markers (13), each 3 bytes long,
+    // we end up with an index of 39. If we add UTFC_PRIV_MIN_HEADER_LEN (4)
+    // and the possible extra length of 3 to the index of 39,
+    // we end up with an index of 46 out of 63.
+    uint8_t reduced_prefixes[UTFC_PRIV_MAX_PREFIX_MARKERS] = { 0 };
 
     const bool use_prefix_reducer = ((data[UTFC_PRIV_HEADER_IDX_FLAGS] & UTFC_PRIV_FLAG_PREFIX_REDUCER) > 0);
     if (use_prefix_reducer) {
@@ -853,7 +858,7 @@ utfc_result utfc_decompress(const char *data, size_t len, bool terminate) {
                 return result;
             }
 
-            reduced_prefixes[i] = (uint16_t)(((uint16_t)prefix_len << 8) | (uint8_t)read_idx);
+            reduced_prefixes[i] = (uint8_t)((prefix_len << 6) | (int8_t)read_idx);
             read_idx += prefix_len;
         }
     }
@@ -867,9 +872,9 @@ utfc_result utfc_decompress(const char *data, size_t len, bool terminate) {
             if ((byte | 1) == 0xC1 || byte >= 0xF5) {
                 const uint8_t marker_idx = (byte - ((byte >= 0xF5) ? 0xF3 : 0xC0));
 
-                const uint16_t rp = reduced_prefixes[marker_idx];
-                cached_prefix_idx = (uint32_t)(rp & 0xFF);
-                cached_prefix_len = (uint8_t)(rp >> 8);
+                const uint8_t rp = reduced_prefixes[marker_idx];
+                cached_prefix_idx = (uint32_t)(rp & 0x3F);
+                cached_prefix_len = (uint8_t)(rp >> 6);
 
                 read_idx += 1;
                 continue;
