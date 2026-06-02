@@ -106,6 +106,87 @@ typedef struct utfc_result {
     uint8_t error;
 } utfc_result;
 
+typedef struct utfc_tol_cfg {
+    uint8_t pct_near;  // Percent for few bytes (e.g., 85 > 15% savings)
+    uint8_t pct_far;   // Percent for many bytes (e.g., 70 > 30% savings)
+    uint32_t len_near; // If the length is this or less, `ratio_near` is applied
+    uint32_t len_far;  // If the length is this or greater, `ratio_far` is applied
+    uint32_t min_len;  // Shorter strings fail immediately
+} utfc_tol_cfg;
+static const utfc_tol_cfg utfc_tol_cfg_default = {
+    .pct_near = 85,
+    .pct_far  = 70,
+    .len_near = 50,
+    .len_far  = 500,
+    .min_len  = 30,
+};
+
+/**
+ * This helper function checks whether the compression was effective.
+ * 
+ * Returns `false` if it makes more sense to use the decompressed text.
+ * 
+ * NOTICE: The length should be the number of bytes, not characters!
+ */
+static inline bool utfc_post_check(uint32_t original_len, uint32_t compressed_len, const utfc_tol_cfg *cfg) {
+    if (cfg == NULL) cfg = &utfc_tol_cfg_default;
+    if (original_len < cfg->min_len) return false;
+
+    uint32_t pct; // percent
+    if (original_len <= cfg->len_near) pct = cfg->pct_near;
+    else if (original_len >= cfg->len_far) pct = cfg->pct_far;
+    else {
+        const uint32_t diff_pct = (cfg->pct_near - cfg->pct_far);
+        const uint32_t diff_len = (cfg->len_far - cfg->len_near);
+        const uint32_t offset = (((original_len - cfg->len_near) * diff_pct) / diff_len);
+        pct = (cfg->pct_near - offset);
+    }
+
+    const uint32_t max_len = ((original_len * pct) / 100);
+    return (compressed_len <= max_len);
+}
+
+/**
+ * This helper function takes up to 10 samples (bytes) from a UTF-8 string
+ * and checks them for potential compression benefits.
+ * 
+ * Returns `false` if the string is less than 10 bytes long or the potential is low.
+ * 
+ * NOTICE: The result is not guaranteed!
+ */
+static inline bool utfc_pre_check(const char* data, uint32_t len) {
+    if (data == NULL || len < 10) return false;
+
+    const uint8_t samples = ((len >= 100) ? 10 : (uint8_t)(3 + ((len * 7) / 100)));
+    const uint8_t required_hits = (uint8_t)((samples * 4) / 10);
+
+    const uint32_t L = (len - 1);
+    const uint32_t D = (samples - 1);
+
+    const uint32_t step = (L / D);
+    const uint32_t mod = (L % D);
+
+    uint32_t idx = 0;
+    uint32_t rem = 0;
+    uint8_t hits = 0;
+
+    for (uint8_t i = 0; i < samples; i++) {
+        if ((data[idx] & 0x80) != 0) {
+            hits++;
+            if (hits >= required_hits) return true;
+        }
+
+        idx += step;
+        rem += mod;
+        if (rem >= D) {
+            idx++;
+            rem -= D;
+        }
+    }
+
+    return false;
+}
+
 /**
  * This function should always be called after `utfc_compression`
  * and `utfc_decompression` when the result is no longer needed.
