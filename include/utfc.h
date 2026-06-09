@@ -398,82 +398,53 @@ static void utfc_priv_prefix_list_add(utfc_priv_prefix_list *list, const char *p
 static bool utfc_priv_next_non_ascii(const char *value, uint32_t len, uint32_t idx, uint32_t *out) {
     if (idx >= len) return false;
 
-#if defined(UTFC_SIMD_512) && (defined(__AVX512BW__) || defined(__riscv_vector))
-    while ((idx + 64) <= len) {
-        #if defined(UTFC_PRIV_RISCV)
-            const vuint8m4_t vec = __riscv_vle8_v_u8m4((const uint8_t *)&value[idx], 64);
-            // We check all `64` bytes for a value greater than `0x7F`(127).
-            // The bits of the positions where the bytes match are set to `1`.
-            const vbool2_t mask = __riscv_vmsgtu_vx_u8m4_b2(vec, 0x7F, 64);
-            // Returns the position of the first 1-bit.
-            // (`-1` means that there is no match)
-            const long pos = __riscv_vfirst_m_b2(mask, 64);
+    const uint8_t *base = (const uint8_t *)value;
+    const uint8_t *ptr = (base + idx);
+    const uint8_t *end = (base + len);
+
+#if defined(UTFC_PRIV_RISCV)
+    #if (defined(UTFC_SIMD_128) || defined(UTFC_SIMD_256) || defined(UTFC_SIMD_512)) && defined(__riscv_vector)
+        while (ptr < end) {
+            const size_t vl = __riscv_vsetvl_e8m1(end - ptr);
+
+            const vuint8m1_t vec = __riscv_vle8_v_u8m1(ptr, vl);
+            const vbool8_t mask = __riscv_vmsgtu_vx_u8m1_b8(vec, 0x7F, vl);
+            const long pos = __riscv_vfirst_m_b8(mask, vl);
+
             if (pos >= 0) {
-                *out = (idx + (uint32_t)pos);
+                *out = (uint32_t)(ptr - base);
+                *out += (uint32_t)pos;
                 return true;
             }
-        #else
-            const __m512i vec = _mm512_loadu_si512((const __m512i *)&value[idx]);
-            const unsigned long long mask = _mm512_movepi8_mask(vec);
-            if (mask != 0) {
-                *out = (uint32_t)utfc_priv_count_zeros((size_t)mask, false);
-                *out += idx;
-                return true;
-            }
-        #endif
 
-        idx += 64;
-    }
-#endif
+            ptr += vl;
+        }
+    #endif
+#elif defined(UTFC_PRIV_ARM)
+    #if defined(UTFC_SIMD_128) && defined(UTFC_PRIV_NEON)
+        while ((ptr + 16) <= end) {
+            const uint8x16_t vec = vld1q_u8(ptr);
+            #if defined(__aarch64__)
+                if (vmaxvq_u8(vec) > 0x7F) {
+                    uint64x2_t bits = vreinterpretq_u64_u8(vec);
 
-#if defined(UTFC_SIMD_256) && (defined(__AVX2__) || defined(__riscv_vector))
-    while ((idx + 32) <= len) {
-        #if defined(UTFC_PRIV_RISCV)
-            const vuint8m2_t vec = __riscv_vle8_v_u8m2((const uint8_t *)&value[idx], 32);
-            // We check all `32` bytes for a value greater than `0x7F`(127).
-            // The bits of the positions where the bytes match are set to `1`.
-            const vbool4_t mask = __riscv_vmsgtu_vx_u8m2_b4(vec, 0x7F, 32);
-            // Returns the position of the first 1-bit.
-            // (`-1` means that there is no match)
-            const long pos = __riscv_vfirst_m_b4(mask, 32);
-            if (pos >= 0) {
-                *out = (idx + (uint32_t)pos);
-                return true;
-            }
-        #else
-            const __m256i vec = _mm256_loadu_si256((const __m256i *)&value[idx]);
-            const int mask = _mm256_movemask_epi8(vec);
-            if (mask != 0) {
-                *out = (uint32_t)utfc_priv_count_zeros((size_t)mask, false);
-                *out += idx;
-                return true;
-            }
-        #endif
+                    const uint64_t low = vgetq_lane_u64(bits, 0);
+                    const uint64_t mask_low = (low & 0x8080808080808080ULL);
+                    if (mask_low != 0) {
+                        *out = (uint32_t)(ptr - base);
+                        *out += ((uint32_t)utfc_priv_count_zeros((size_t)mask_low, false) >> 3);
+                        return true;
+                    }
 
-        idx += 32;
-    }
-#endif
+                    const uint64_t high = vgetq_lane_u64(bits, 1);
+                    const uint64_t mask_high = (high & 0x8080808080808080ULL);
+                    
+                    *out = (uint32_t)(ptr - base) + 8;
+                    *out += ((uint32_t)utfc_priv_count_zeros((size_t)mask_high, false) >> 3);
 
-#if defined(UTFC_SIMD_128) && (defined(__SSE2__) || defined(UTFC_PRIV_NEON) || defined(__riscv_vector))
-    while ((idx + 16) <= len) {
-        #if defined(UTFC_PRIV_RISCV)
-            const vuint8m1_t vec = __riscv_vle8_v_u8m1((const uint8_t *)&value[idx], 16);
-            // We check all `16` bytes for a value greater than `0x7F`(127).
-            // The bits of the positions where the bytes match are set to `1`.
-            const vbool8_t mask = __riscv_vmsgtu_vx_u8m1_b8(vec, 0x7F, 16);
-            // Returns the position of the first 1-bit.
-            // (`-1` means that there is no match)
-            const long pos = __riscv_vfirst_m_b8(mask, 16);
-            if (pos >= 0) {
-                *out = (idx + (uint32_t)pos);
-                return true;
-            }
-        #else
-            #if defined(UTFC_PRIV_X86)
-                const __m128i vec = _mm_loadu_si128((const __m128i *)&value[idx]);
-                const int mask = _mm_movemask_epi8(vec);
-            #elif defined(UTFC_PRIV_ARM)
-                const uint8x16_t vec = vld1q_u8((const uint8_t *)&value[idx]);
+                    return true;
+                }
+            #else
                 // Right-shift each byte by 7 to extract MSB into LSB.
                 const uint8x16_t msbs = vshrq_n_u8(vec, 7);
                 // Reinterpret as 64-bit elements (2 lanes).
@@ -489,23 +460,70 @@ static bool utfc_priv_next_non_ascii(const char *value, uint32_t len, uint32_t i
                 const unsigned char high = vgetq_lane_u8(output, 8);
                 // Combine into 16-bit mask.
                 const unsigned short mask = (((unsigned short)high << 8) | (unsigned short)low);
+
+                if (mask != 0) {
+                    *out = (uint32_t)(ptr - base);
+                    *out += (uint32_t)utfc_priv_count_zeros((size_t)mask, false);
+                    return true;
+                }
             #endif
+
+            ptr += 16;
+        }
+    #endif
+#else // X86-64
+    #if defined(UTFC_SIMD_512) && defined(__AVX512BW__)
+        while ((ptr + 64) <= end) {
+            const __m512i vec = _mm512_loadu_si512((const __m512i *)ptr);
+            const unsigned long long mask = _mm512_movepi8_mask(vec);
+
             if (mask != 0) {
-                *out = (idx + (uint32_t)utfc_priv_count_zeros((size_t)mask, false));
+                *out = (uint32_t)(ptr - base);
+                *out += (uint32_t)utfc_priv_count_zeros((size_t)mask, false);
                 return true;
             }
-        #endif
 
-        idx += 16;
-    }
+            ptr += 64;
+        }
+    #endif
+
+    #if defined(UTFC_SIMD_256) && defined(__AVX2__)
+        while ((ptr + 32) <= end) {
+            const __m256i vec = _mm256_loadu_si256((const __m256i *)ptr);
+            const int mask = _mm256_movemask_epi8(vec);
+
+            if (mask != 0) {
+                *out = (uint32_t)(ptr - base);
+                *out += (uint32_t)utfc_priv_count_zeros((size_t)mask, false);
+                return true;
+            }
+
+            ptr += 32;
+        }
+    #endif
+
+    #if defined(UTFC_SIMD_128) && defined(__SSE2__)
+        while ((ptr + 16) <= end) {
+            const __m128i vec = _mm_loadu_si128((const __m128i *)ptr);
+            const int mask = _mm_movemask_epi8(vec);
+
+            if (mask != 0) {
+                *out = (uint32_t)(ptr - base);
+                *out += (uint32_t)utfc_priv_count_zeros((size_t)mask, false);
+                return true;
+            }
+
+            ptr += 16;
+        }
+    #endif
 #endif
 
-    while (idx < len) {
-        if ((value[idx] & 0x80) != 0) {
-            *out = idx;
+    while (ptr < end) {
+        if (*ptr > 0x7F) {
+            *out = (uint32_t)(ptr - base);
             return true;
         }
-        idx += 1;
+        ptr++;
     }
 
     return false;
