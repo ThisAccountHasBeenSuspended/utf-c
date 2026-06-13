@@ -50,16 +50,16 @@
 #if !defined(UTFC_H)
 #define UTFC_H
 
-// ── PUBLIC ───────────────────────────────────────────────────────────────
-#if defined(__cplusplus)
-extern "C" {
-#endif // __cplusplus
-
 #include <stddef.h>
 #include <stdint.h>
 #include <stdbool.h>
 #include <string.h>
 #include <stdlib.h>
+
+// ── PUBLIC ───────────────────────────────────────────────────────────────
+#if defined(__cplusplus)
+extern "C" {
+#endif // __cplusplus
 
 #define UTFC_MAJOR 0
 #define UTFC_MINOR 2
@@ -202,7 +202,7 @@ static inline void utfc_result_deinit(utfc_result *result) {
 }
 
 utfc_result utfc_compress(const char *data, size_t len);
-utfc_result utfc_decompress(const char *data, size_t len, bool terminate);
+utfc_result utfc_decompress(const char *data, size_t len);
 
 #if defined(__cplusplus)
 }
@@ -633,7 +633,13 @@ static bool utfc_priv_write_header(utfc_result *result, uint32_t len) {
     result->value[UTFC_PRIV_HEADER_IDX_FLAGS] = flags;
 
     // Copy the payload length into the next `1 + extra_length_bytes` bytes.
-    memcpy(&result->value[UTFC_PRIV_HEADER_IDX_LENGTH], &len, (1 + extra_length_bytes));
+    result->value[UTFC_PRIV_HEADER_IDX_LENGTH] = (char)(len & 0xFF);
+    switch (extra_length_bytes) {
+        case UTFC_PRIV_EXTRA_LENGTH_BYTES_3: result->value[UTFC_PRIV_HEADER_IDX_LENGTH + 3] = (char)((len >> 24) & 0xFF); // fallthrough
+        case UTFC_PRIV_EXTRA_LENGTH_BYTES_2: result->value[UTFC_PRIV_HEADER_IDX_LENGTH + 2] = (char)((len >> 16) & 0xFF); // fallthrough
+        case UTFC_PRIV_EXTRA_LENGTH_BYTES_1: result->value[UTFC_PRIV_HEADER_IDX_LENGTH + 1] = (char)((len >> 8) & 0xFF);  // fallthrough
+        case UTFC_PRIV_EXTRA_LENGTH_BYTES_0: break;
+    }
     result->len += extra_length_bytes;
 
     return true;
@@ -656,7 +662,13 @@ static bool utfc_priv_read_header(utfc_priv_header *header, const char *data, ui
     if (len < (uint32_t)(UTFC_PRIV_MIN_HEADER_LEN + extra_length_bytes)) return false;
 
     // Copy the payload length bytes into `payload_length`.
-    memcpy(&header->payload_len, &data[UTFC_PRIV_HEADER_IDX_LENGTH], (1 + extra_length_bytes));
+    header->payload_len = (uint32_t)(uint8_t)data[UTFC_PRIV_HEADER_IDX_LENGTH];
+    switch (extra_length_bytes) {
+        case UTFC_PRIV_EXTRA_LENGTH_BYTES_3: header->payload_len |= ((uint32_t)(uint8_t)data[UTFC_PRIV_HEADER_IDX_LENGTH + 3] << 24); // fallthrough
+        case UTFC_PRIV_EXTRA_LENGTH_BYTES_2: header->payload_len |= ((uint32_t)(uint8_t)data[UTFC_PRIV_HEADER_IDX_LENGTH + 2] << 16); // fallthrough
+        case UTFC_PRIV_EXTRA_LENGTH_BYTES_1: header->payload_len |= ((uint32_t)(uint8_t)data[UTFC_PRIV_HEADER_IDX_LENGTH + 1] << 8);  // fallthrough
+        case UTFC_PRIV_EXTRA_LENGTH_BYTES_0: break;
+    }
 
     // Write the total length of the header.
     // (We start the decompression at this index)
@@ -755,7 +767,7 @@ static void utfc_priv_prefix_reducer_sort_desc(const utfc_priv_prefix_list *pref
 
 static void utfc_priv_prefix_reducer_remove(
     uint32_t sorted_prefixes[UTFC_PREFIX_REDUCER_STACK_LIMIT],
-    uint32_t sorted_prefixes_len,
+    uint8_t sorted_prefixes_len,
     utfc_result *result,
     const utfc_priv_prefix_list *prefix_list
 ) {
@@ -805,32 +817,35 @@ static void utfc_priv_prefix_reducer_remove(
 
 static void utfc_priv_prefix_reducer_add(
     uint32_t sorted_prefixes[UTFC_PREFIX_REDUCER_STACK_LIMIT],
-    uint32_t sorted_prefixes_len,
+    uint8_t sorted_prefixes_len,
     utfc_result *result
 ) {
     const uint8_t header_len = (UTFC_PRIV_MIN_HEADER_LEN + (result->value[UTFC_PRIV_HEADER_IDX_FLAGS] & UTFC_PRIV_FLAG_EXTRA_LENGTH_BYTES_3));
 
-    // Set the byte for the length of the reduced prefixes directly after the header.
-    memmove(&result->value[header_len + 1], &result->value[header_len], (result->len - header_len));
-    result->len += 1;
-    result->value[header_len] = sorted_prefixes_len;
+    uint32_t table_size = 1;
+    for (uint8_t i = 0; i < sorted_prefixes_len; i++) {
+        table_size += (uint8_t)(sorted_prefixes[i] >> 24);
+    }
 
-    // We move the payload (number of bytes of the prefix)
-    // to the right and write the prefix in front of it.
-    for (uint8_t i = sorted_prefixes_len; i-- > 0;) {
+    memmove(&result->value[header_len + table_size], &result->value[header_len], (result->len - header_len));
+
+    result->value[header_len] = (char)sorted_prefixes_len;
+    uint32_t write_idx = (header_len + 1);
+
+    for (uint8_t i = 0; i < sorted_prefixes_len; i++) {
         char prefix[3] = { 0 };
         uint8_t prefix_len = 0;
         utfc_priv_prefix_unpack(sorted_prefixes[i], prefix, &prefix_len);
 
-        const uint32_t from = (header_len + 1);
-        const uint32_t to = (from + prefix_len);
-
-        memmove(&result->value[to], &result->value[from], (result->len - from));
-        for (uint8_t j = 0; j < prefix_len; j++) {
-            result->value[from + j] = prefix[j];
+        switch (prefix_len) {
+            case 3: result->value[write_idx + 2] = prefix[2]; // fallthrough
+            case 2: result->value[write_idx + 1] = prefix[1]; // fallthrough
+            case 1: result->value[write_idx]     = prefix[0]; // fallthrough
+            default: write_idx += prefix_len;
         }
-        result->len += prefix_len;
     }
+    
+    result->len += table_size;
 }
 
 static void utfc_priv_prefix_reducer(utfc_result *result, const utfc_priv_prefix_list *prefix_list) {
@@ -845,7 +860,11 @@ static void utfc_priv_prefix_reducer(utfc_result *result, const utfc_priv_prefix
     // Set header flag.
     result->value[UTFC_PRIV_HEADER_IDX_FLAGS] |= UTFC_PRIV_FLAG_PREFIX_REDUCER;
 
+    // Using the `remove` function, we replace all selected and sorted prefixes with the marker bytes.
     utfc_priv_prefix_reducer_remove(sorted_prefixes, sorted_prefixes_len, result, prefix_list);
+    // Using the `add` function, we append all prefixes replaced with marker bytes to the very beginning
+    // of the payload, so that we can identify them later.
+    // [ 0x??, 0x??, 0x??, 0x??, PREFIX-1, PREFIX-2, PREFIX-3, ... ]
     utfc_priv_prefix_reducer_add(sorted_prefixes, sorted_prefixes_len, result);
 }
 
@@ -947,7 +966,7 @@ utfc_result utfc_compress(const char *data, size_t len) {
  * - `terminate` adds a '\0' at the end.
  * - `return.len` contains only the written bytes, not the possible '\0' at the end.
  */
-utfc_result utfc_decompress(const char *data, size_t len, bool terminate) {
+utfc_result utfc_decompress(const char *data, size_t len) {
     utfc_result result = { 0 };
     
     if (len > UINT32_MAX) {
@@ -962,8 +981,7 @@ utfc_result utfc_decompress(const char *data, size_t len, bool terminate) {
         return result;
     }
 
-    // If terminate = 1 we allocate one more to terminate it with a '\0'.
-    result.value = (char *)malloc((header.payload_len + (terminate == false ? 0 : 1)) * sizeof(*result.value));
+    result.value = (char *)malloc((header.payload_len + 1 /* null terminator */) * sizeof(*result.value));
     if (result.value == NULL) {
         result.error = UTFC_ERROR_OUT_OF_MEMORY;
         return result;
@@ -1067,6 +1085,9 @@ utfc_result utfc_decompress(const char *data, size_t len, bool terminate) {
 
         result.value[result.len++] = data[read_idx++];
     }
+
+    // Success. Finally, we set the null byte.
+    result.value[header.payload_len] = '\0';
 
     return result;
 }
