@@ -449,49 +449,45 @@ static bool utfc_priv_next_non_ascii(const char *value, uint32_t len, uint32_t i
     #if defined(UTFC_SIMD_128) && defined(UTFC_PRIV_NEON)
         while ((ptr + 16) <= end) {
             const uint8x16_t vec = vld1q_u8(ptr);
+
+            // Right-shift each byte by 7 to extract MSB into LSB.
+            const uint8x16_t msbs = vshrq_n_u8(vec, 7);
+            // Reinterpret as 64-bit elements (2 lanes).
+            uint64x2_t bits = vreinterpretq_u64_u8(msbs);
+            // Accumulate bits with shifting.
+            bits = vsraq_n_u64(bits, bits, 7);
+            bits = vsraq_n_u64(bits, bits, 14);
+            bits = vsraq_n_u64(bits, bits, 28);
+            // Reinterpret back to 8-bit elements (16 lanes).
+            uint8x16_t output = vreinterpretq_u8_u64(bits);
             #if defined(__aarch64__)
-                if (vmaxvq_u8(vec) > 0x7F) {
-                    uint64x2_t bits = vreinterpretq_u64_u8(vec);
+                /**
+                 * Instead of extracting both bytes into scalar registers and combining
+                 * them via bitwise operations, we copy the high byte directly into place
+                 * and extract the 16-bit result.
+                 */
 
-                    const uint64_t low = vgetq_lane_u64(bits, 0);
-                    const uint64_t mask_low = (low & 0x8080808080808080ULL);
-                    if (mask_low != 0) {
-                        *out = (uint32_t)(ptr - base);
-                        *out += ((uint32_t)utfc_priv_count_zeros((size_t)mask_low) >> 3);
-                        return true;
-                    }
-
-                    const uint64_t high = vgetq_lane_u64(bits, 1);
-                    const uint64_t mask_high = (high & 0x8080808080808080ULL);
-                    
-                    *out = (uint32_t)(ptr - base) + 8;
-                    *out += ((uint32_t)utfc_priv_count_zeros((size_t)mask_high) >> 3);
-
-                    return true;
-                }
+                // Copy the high byte from lane 8 to lane 1,
+                // right next to the untouched low byte at lane 0.
+                output = vcopyq_laneq_u8(output, 1, output, 8);
+                // Reinterpret so lanes 0 and 1 form a single 16-bit element.
+                const uint16x8_t combined = vreinterpretq_u16_u8(output);
+                // Read lanes 0+1 together as the combined 16-bit mask.
+                const unsigned short mask = vgetq_lane_u16(combined, 0);
             #else
-                // Right-shift each byte by 7 to extract MSB into LSB.
-                const uint8x16_t msbs = vshrq_n_u8(vec, 7);
-                // Reinterpret as 64-bit elements (2 lanes).
-                uint64x2_t bits = vreinterpretq_u64_u8(msbs);
-                // Accumulate bits with shifting.
-                bits = vsraq_n_u64(bits, bits, 7);
-                bits = vsraq_n_u64(bits, bits, 14);
-                bits = vsraq_n_u64(bits, bits, 28);
-                // Reinterpret back to 8-bit elements.
-                const uint8x16_t output = vreinterpretq_u8_u64(bits);
-                // Extract the two bytes at positions 0(low) and 8(high).
-                const unsigned char low = vgetq_lane_u8(output, 0);
-                const unsigned char high = vgetq_lane_u8(output, 8);
-                // Combine into 16-bit mask.
-                const unsigned short mask = (((unsigned short)high << 8) | (unsigned short)low);
-
-                if (mask != 0) {
-                    *out = (uint32_t)(ptr - base);
-                    *out += (uint32_t)utfc_priv_count_zeros((size_t)mask);
-                    return true;
-                }
+                // Extract the low byte from position 0.
+                const unsigned char output_low = vgetq_lane_u8(output, 0);
+                // Extract the high byte from position 8.
+                const unsigned char output_high = vgetq_lane_u8(output, 8);
+                // Combine both bytes into a 16-bit mask.
+                const unsigned short mask = (((unsigned short)output_high << 8) | (unsigned short)output_low);
             #endif
+
+            if (mask != 0) {
+                *out = (uint32_t)(ptr - base);
+                *out += (uint32_t)utfc_priv_count_zeros((size_t)mask);
+                return true;
+            }
 
             ptr += 16;
         }
